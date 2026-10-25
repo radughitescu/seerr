@@ -32,6 +32,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import Media from './Media';
+import { RequestItemControl } from './RequestItemControl';
 import SeasonRequest from './SeasonRequest';
 import { User } from './User';
 
@@ -540,6 +541,9 @@ export class MediaRequest {
     cascade: true,
   })
   public seasons: SeasonRequest[];
+
+  @OneToMany(() => RequestItemControl, (control) => control.request)
+  public controls: RequestItemControl[];
 
   @Column({ default: false })
   public is4k: boolean;

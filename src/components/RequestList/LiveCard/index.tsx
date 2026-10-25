@@ -176,6 +176,8 @@ const LiveCard = ({ request, state, title, onAction }: LiveCardProps) => {
 
   const bulk = bulkControl(state);
   const movieActions = state.movie?.actions ?? state.actions;
+  const locked = busy || !state.available;
+  const dimmed = state.available ? '' : 'opacity-60';
 
   return (
     <div className="relative z-10 border-t border-gray-700 px-4 pb-3 pt-3 text-sm text-gray-300">
@@ -192,19 +194,21 @@ const LiveCard = ({ request, state, title, onAction }: LiveCardProps) => {
               </StatusPill>
             )}
           </div>
-          {state.available && parts.percent !== undefined && (
-            <ProgressBar
-              percent={parts.percent}
-              status={state.summary.status}
-            />
-          )}
-          {state.available && state.movie && (
-            <ItemDetail
-              status={state.movie.status}
-              lastSearchedAt={state.movie.lastSearchedAt}
-              error={state.movie.error}
-            />
-          )}
+          <div className={dimmed}>
+            {parts.percent !== undefined && (
+              <ProgressBar
+                percent={parts.percent}
+                status={state.summary.status}
+              />
+            )}
+            {state.movie && (
+              <ItemDetail
+                status={state.movie.status}
+                lastSearchedAt={state.movie.lastSearchedAt}
+                error={state.movie.error}
+              />
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap gap-2 sm:w-40 sm:flex-col sm:items-stretch">
           {plexUrl && (
@@ -220,83 +224,82 @@ const LiveCard = ({ request, state, title, onAction }: LiveCardProps) => {
               <span>{intl.formatMessage(messages.playOnPlex)}</span>
             </a>
           )}
-          {state.available &&
-            (isMovie ? (
-              <>
-                {movieActions.includes('prioritize') && (
-                  <ControlButton
-                    action="prioritize"
-                    large
-                    disabled={busy}
-                    onClick={() => trigger('prioritize', wholeTarget)}
-                  />
-                )}
-                {bulk && (
-                  <ControlButton
-                    action={bulk}
-                    large
-                    disabled={busy}
-                    onClick={() => trigger(bulk, wholeTarget)}
-                  />
-                )}
-                {movieActions.includes('restore') && (
-                  <ControlButton
-                    action="restore"
-                    large
-                    disabled={busy}
-                    onClick={() => trigger('restore', wholeTarget)}
-                  />
-                )}
-                {movieActions.includes('delete') && (
-                  <ControlButton
-                    action="delete"
-                    large
-                    disabled={busy}
-                    onClick={() => trigger('delete', wholeTarget)}
-                  />
-                )}
-              </>
-            ) : (
-              <>
-                {bulk && (
-                  <ControlButton
-                    action={bulk}
-                    large
-                    label={intl.formatMessage(
-                      bulk === 'resume' ? messages.resumeAll : messages.pauseAll
-                    )}
-                    disabled={busy}
-                    onClick={() => trigger(bulk, wholeTarget)}
-                  />
-                )}
-                {state.actions.includes('restore') && (
-                  <ControlButton
-                    action="restore"
-                    large
-                    disabled={busy}
-                    onClick={() => trigger('restore', wholeTarget)}
-                  />
-                )}
-                {state.actions.includes('delete') && (
-                  <ControlButton
-                    action="delete"
-                    large
-                    label={intl.formatMessage(messages.deleteRequest)}
-                    disabled={busy}
-                    onClick={() => trigger('delete', wholeTarget)}
-                  />
-                )}
-              </>
-            ))}
+          {isMovie ? (
+            <>
+              {movieActions.includes('prioritize') && (
+                <ControlButton
+                  action="prioritize"
+                  large
+                  disabled={locked}
+                  onClick={() => trigger('prioritize', wholeTarget)}
+                />
+              )}
+              {bulk && (
+                <ControlButton
+                  action={bulk}
+                  large
+                  disabled={locked}
+                  onClick={() => trigger(bulk, wholeTarget)}
+                />
+              )}
+              {movieActions.includes('restore') && (
+                <ControlButton
+                  action="restore"
+                  large
+                  disabled={locked}
+                  onClick={() => trigger('restore', wholeTarget)}
+                />
+              )}
+              {movieActions.includes('delete') && (
+                <ControlButton
+                  action="delete"
+                  large
+                  disabled={locked}
+                  onClick={() => trigger('delete', wholeTarget)}
+                />
+              )}
+            </>
+          ) : (
+            <>
+              {bulk && (
+                <ControlButton
+                  action={bulk}
+                  large
+                  label={intl.formatMessage(
+                    bulk === 'resume' ? messages.resumeAll : messages.pauseAll
+                  )}
+                  disabled={locked}
+                  onClick={() => trigger(bulk, wholeTarget)}
+                />
+              )}
+              {state.actions.includes('restore') && (
+                <ControlButton
+                  action="restore"
+                  large
+                  disabled={locked}
+                  onClick={() => trigger('restore', wholeTarget)}
+                />
+              )}
+              {state.actions.includes('delete') && (
+                <ControlButton
+                  action="delete"
+                  large
+                  label={intl.formatMessage(messages.deleteRequest)}
+                  disabled={locked}
+                  onClick={() => trigger('delete', wholeTarget)}
+                />
+              )}
+            </>
+          )}
         </div>
       </div>
-      {state.available &&
-        state.seasons.map((season) => (
+      <div className={dimmed}>
+        {state.seasons.map((season) => (
           <SeasonSection
             key={`season-${season.seasonNumber}`}
             season={season}
             open={isOpen(season.seasonNumber)}
-            disabled={busy}
+            disabled={locked}
             onToggle={() =>
               setOpenSeasons((prev) => ({
                 ...prev,
@@ -314,6 +317,7 @@ const LiveCard = ({ request, state, title, onAction }: LiveCardProps) => {
             }
           />
         ))}
+      </div>
       <DeleteConfirmModal
         requestId={request.id}
         target={deleteTarget}

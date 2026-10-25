@@ -909,13 +909,16 @@ export async function runAction(req: ActionRequest): Promise<RequestLiveState> {
         break;
     }
 
-    void liveStatusHub.refresh(request.id);
+    await liveStatusHub.refresh(request.id);
 
-    return deriveRequestState({
-      ...ctx.inputs,
-      now: new Date().toISOString(),
-      controls: await getControls(request.id),
-    });
+    return (
+      liveStatusHub.cachedState(request.id) ??
+      deriveRequestState({
+        ...ctx.inputs,
+        now: new Date().toISOString(),
+        controls: await getControls(request.id),
+      })
+    );
   });
 }
 

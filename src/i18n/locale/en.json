@@ -567,6 +567,8 @@
   "components.RequestList.LiveCard.searching": "Searching",
   "components.RequestList.LiveCard.season": "Season {seasonNumber}",
   "components.RequestList.LiveCard.seasonDeleted": "Deleted · {ready}/{total}",
+  "components.RequestList.LiveCard.seasonDeletedSince": "Deleted · {date}",
+  "components.RequestList.LiveCard.seasonPausedSince": "Paused · {date}",
   "components.RequestList.LiveCard.seasonStatus": "{status} · {ready}/{total}",
   "components.RequestList.LiveCard.serviceError": "{service}: {message}",
   "components.RequestList.LiveCard.stalled": "Stalled",

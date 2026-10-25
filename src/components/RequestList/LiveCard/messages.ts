@@ -35,6 +35,8 @@ const messages = defineMessages('components.RequestList.LiveCard', {
   season: 'Season {seasonNumber}',
   seasonDeleted: 'Deleted · {ready}/{total}',
   seasonStatus: '{status} · {ready}/{total}',
+  seasonDeletedSince: 'Deleted · {date}',
+  seasonPausedSince: 'Paused · {date}',
   peers: '{count, plural, one {# peer} other {# peers}}',
   rate: '{rate}/s',
   episodeCount: '{count, plural, one {# episode} other {# episodes}}',

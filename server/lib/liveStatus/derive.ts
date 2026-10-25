@@ -5,7 +5,10 @@ import type {
   RequestItemControl,
 } from '@server/entity/RequestItemControl';
 import { mapFilesToEpisodes } from '@server/lib/requestControls/fileMap';
-import { effectiveState } from '@server/lib/requestControls/store';
+import {
+  effectiveControl,
+  effectiveState,
+} from '@server/lib/requestControls/store';
 import type {
   ItemAction,
   ItemState,
@@ -74,6 +77,18 @@ const PRIORITY: ItemStatus[] = [
   'on_plex',
   'deleted',
 ];
+
+const isoTime = (value: Date | string | undefined): string | undefined => {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+};
+
+const latestTime = (times: (string | undefined)[]): string | undefined =>
+  times
+    .filter((t): t is string => !!t)
+    .sort()
+    .pop();
 
 const selectedBytes = (t: TorrentInfo, indexes?: number[]) => {
   const files = indexes?.length
@@ -245,6 +260,11 @@ export function deriveRequestState(input: RequestInputs): RequestLiveState {
     if (src.title !== undefined) item.title = src.title;
     if (src.sizeOnDisk !== undefined) item.bytesOnDisk = src.sizeOnDisk;
     if (src.lastSearchTime) item.lastSearchedAt = src.lastSearchTime;
+    if (status === 'paused' || status === 'deleted') {
+      const row = effectiveControl(input.controls, seasonNumber, episodeNumber);
+      const since = row?.state === status ? isoTime(row.updatedAt) : undefined;
+      if (since) item.controlSince = since;
+    }
 
     let weight = 0;
     let done = 0;
@@ -342,6 +362,18 @@ export function deriveRequestState(input: RequestInputs): RequestLiveState {
         episodes: builts.map((b) => b.item),
         actions: actionsFor(status),
       };
+      if (status === 'paused' || status === 'deleted') {
+        const row = effectiveControl(input.controls, seasonNumber, null);
+        const since =
+          row?.state === status
+            ? isoTime(row.updatedAt)
+            : latestTime(
+                builts
+                  .filter((b) => b.item.status === status)
+                  .map((b) => b.item.controlSince)
+              );
+        if (since) season.controlSince = since;
+      }
       const hashes = new Set(
         builts.map((b) => b.hash).filter((h): h is string => !!h)
       );

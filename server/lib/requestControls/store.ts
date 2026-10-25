@@ -173,13 +173,13 @@ export async function releaseControl(
   });
 }
 
-export function effectiveState(
+export function effectiveControl(
   controls: RequestItemControl[],
   seasonNumber: number | null,
   episodeNumber: number | null
-): ControlState | null {
+): RequestItemControl | null {
   const find = (s: number | null, e: number | null) =>
-    controls.find((c) => c.seasonNumber === s && c.episodeNumber === e)?.state;
+    controls.find((c) => c.seasonNumber === s && c.episodeNumber === e);
 
   return (
     (seasonNumber !== null && episodeNumber !== null
@@ -189,6 +189,14 @@ export function effectiveState(
     find(null, null) ??
     null
   );
+}
+
+export function effectiveState(
+  controls: RequestItemControl[],
+  seasonNumber: number | null,
+  episodeNumber: number | null
+): ControlState | null {
+  return effectiveControl(controls, seasonNumber, episodeNumber)?.state ?? null;
 }
 
 export async function isBlocked(

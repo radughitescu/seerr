@@ -166,14 +166,14 @@ export function relativeTime(
 
 export function mergePreviews(previews: DeletePreview[]): DeletePreview {
   const seen = new Map<string, DeletePreview['files'][number]>();
-  let bytesFreed = 0;
-  let duplicateBytes = 0;
+  let remainder = 0;
   for (const preview of previews) {
-    bytesFreed += preview.bytesFreed;
+    remainder +=
+      preview.bytesFreed -
+      preview.files.reduce((sum, file) => sum + file.freedBytes, 0);
     for (const file of preview.files) {
       const existing = seen.get(file.path);
       if (existing) {
-        duplicateBytes += file.bytes;
         existing.episodes = [
           ...new Set([...existing.episodes, ...file.episodes]),
         ];
@@ -182,9 +182,12 @@ export function mergePreviews(previews: DeletePreview[]): DeletePreview {
       }
     }
   }
+  const files = [...seen.values()];
   return {
-    files: [...seen.values()],
-    bytesFreed: Math.max(0, bytesFreed - duplicateBytes),
+    files,
+    bytesFreed:
+      files.reduce((sum, file) => sum + file.freedBytes, 0) +
+      Math.max(0, remainder),
     torrentKept: previews.some((p) => p.torrentKept),
   };
 }

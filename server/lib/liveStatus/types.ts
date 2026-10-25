@@ -28,6 +28,7 @@ export interface ItemState {
   etaSeconds?: number;
   lastSearchedAt?: string;
   error?: string;
+  controlSince?: string;
   actions: ItemAction[];
 }
 
@@ -41,6 +42,7 @@ export interface SeasonState {
     rateBytes: number;
   };
   episodes: ItemState[];
+  controlSince?: string;
   actions: ItemAction[];
 }
 

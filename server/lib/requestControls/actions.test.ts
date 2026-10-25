@@ -426,6 +426,45 @@ describe('request control actions', () => {
       assert.equal(state.requestId, ctx.request.id);
     });
 
+    it('waits for the hub refresh and returns its cached state', async () => {
+      const ctx = await seed(MediaType.TV);
+      install({
+        episodes: [ep(1), ep(2)],
+        queue: [q(1, SINGLE, 101)],
+        torrents: [torrent(SINGLE, [['Show.S01E01.mkv', 100, 50]])],
+      });
+      const fresh = {
+        requestId: ctx.request.id,
+        available: true,
+        updatedAt: 'fresh',
+      } as RequestLiveState;
+      let refreshed = false;
+      const refresh = mock.method(liveStatusHub, 'refresh', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        refreshed = true;
+      });
+      mock.method(liveStatusHub, 'cachedState', (id: number) =>
+        refreshed && id === ctx.request.id ? fresh : undefined
+      );
+      const state = await act(ctx, 'pause', 1, 1);
+      assert.equal(refresh.mock.callCount(), 1);
+      assert.equal(state, fresh);
+    });
+
+    it('returns the derived state when the hub has no cached state', async () => {
+      const ctx = await seed(MediaType.TV);
+      install({
+        episodes: [ep(1), ep(2)],
+        queue: [q(1, SINGLE, 101)],
+        torrents: [torrent(SINGLE, [['Show.S01E01.mkv', 100, 50]])],
+      });
+      mock.method(liveStatusHub, 'refresh', async () => undefined);
+      mock.method(liveStatusHub, 'cachedState', () => undefined);
+      const state = await act(ctx, 'pause', 1, 1);
+      assert.equal(state.requestId, ctx.request.id);
+      assert.equal(state.seasons[0].episodes[0].status, 'paused');
+    });
+
     it('marks the files of a pack episode unwanted', async () => {
       const ctx = await seed(MediaType.TV);
       const { log } = install({
@@ -753,6 +792,7 @@ describe('request control actions', () => {
           {
             path: '/tv/Show/Show.S01E01E02.mkv',
             bytes: 2000,
+            freedBytes: 2000,
             episodes: ['S01E01', 'S01E02'],
           },
         ],
@@ -782,11 +822,53 @@ describe('request control actions', () => {
       const preview = await getDeletePreview(ctx.request, 1, 2);
       assert.deepEqual(preview, {
         files: [
-          { path: '/tv/Show/S01E02.mkv', bytes: 1000, episodes: ['S01E02'] },
+          {
+            path: '/tv/Show/S01E02.mkv',
+            bytes: 1000,
+            freedBytes: 0,
+            episodes: ['S01E02'],
+          },
         ],
         bytesFreed: 0,
         torrentKept: true,
       });
+    });
+
+    it('preview reports freedBytes 0 for a hardlinked file kept by a seeding pack and its size otherwise', async () => {
+      const ctx = await seed(MediaType.TV);
+      install({
+        episodes: [
+          ep(1, { hasFile: true, episodeFileId: 501 }),
+          ep(2, { hasFile: true, episodeFileId: 502 }),
+          ep(3),
+        ],
+        episodeFiles: [
+          { id: 501, path: '/tv/Show/S01E01.mkv', size: 1000 },
+          { id: 502, path: '/tv/Show/S01E02.mkv', size: 1000 },
+        ],
+        history: grabbed(PACK, 102),
+        torrents: [
+          torrent(
+            PACK,
+            [
+              ['Show/Show.S01E02.mkv', 1000, 1000],
+              ['Show/Show.S02E01.mkv', 1000, 1000],
+            ],
+            { status: 6 }
+          ),
+        ],
+      });
+      const preview = await getDeletePreview(ctx.request, 1, null);
+      assert.equal(preview.torrentKept, true);
+      const byPath = Object.fromEntries(
+        preview.files.map((f) => [f.path, f.freedBytes])
+      );
+      assert.equal(byPath['/tv/Show/S01E01.mkv'], 1000);
+      assert.equal(byPath['/tv/Show/S01E02.mkv'], 0);
+      assert.equal(
+        preview.bytesFreed,
+        preview.files.reduce((sum, f) => sum + f.freedBytes, 0)
+      );
     });
 
     it('preview of a season counts library files and torrent data without a library copy', async () => {
@@ -905,7 +987,12 @@ describe('request control actions', () => {
       const preview = await getDeletePreview(ctx.request, 1, 2);
       assert.deepEqual(preview, {
         files: [
-          { path: '/tv/Show/S01E02.mkv', bytes: 1000, episodes: ['S01E02'] },
+          {
+            path: '/tv/Show/S01E02.mkv',
+            bytes: 1000,
+            freedBytes: 0,
+            episodes: ['S01E02'],
+          },
         ],
         bytesFreed: 0,
         torrentKept: true,
@@ -1299,7 +1386,14 @@ describe('request control actions', () => {
       });
       const preview = await getDeletePreview(ctx.request, null, null);
       assert.deepEqual(preview, {
-        files: [{ path: '/movies/Movie.2.mkv', bytes: 1000, episodes: [] }],
+        files: [
+          {
+            path: '/movies/Movie.2.mkv',
+            bytes: 1000,
+            freedBytes: 0,
+            episodes: [],
+          },
+        ],
         bytesFreed: 0,
         torrentKept: true,
       });

@@ -264,6 +264,50 @@ describe('deriveRequestState', () => {
     assert.deepEqual(state.seasons[0].actions, ['restore']);
   });
 
+  it('deleted season carries controlSince', () => {
+    const at = new Date('2026-10-25T19:46:00.000Z');
+    const state = deriveRequestState(
+      input({
+        controls: [{ ...control('deleted', 1, null), updatedAt: at }],
+        episodes: [ep(1), ep(2)],
+      })
+    );
+    assert.equal(state.seasons[0].status, 'deleted');
+    assert.equal(state.seasons[0].controlSince, at.toISOString());
+    assert.equal(state.seasons[0].episodes[0].controlSince, at.toISOString());
+  });
+
+  it('season deleted episode by episode carries the latest controlSince', () => {
+    const state = deriveRequestState(
+      input({
+        controls: [
+          {
+            ...control('deleted', 1, 1),
+            updatedAt: new Date('2026-10-25T10:00:00.000Z'),
+          },
+          {
+            ...control('deleted', 1, 2),
+            updatedAt: new Date('2026-10-25T11:00:00.000Z'),
+          },
+        ],
+        episodes: [ep(1), ep(2)],
+      })
+    );
+    assert.equal(state.seasons[0].controlSince, '2026-10-25T11:00:00.000Z');
+  });
+
+  it('paused episode carries controlSince and active items do not', () => {
+    const at = new Date('2026-10-25T08:00:00.000Z');
+    const state = deriveRequestState(
+      input({
+        controls: [{ ...control('paused', 1, 2), updatedAt: at }],
+        episodes: [ep(1), ep(2)],
+      })
+    );
+    assert.equal(state.seasons[0].episodes[0].controlSince, undefined);
+    assert.equal(state.seasons[0].episodes[1].controlSince, at.toISOString());
+  });
+
   it('summary counts ready/paused/deleted', () => {
     const state = deriveRequestState(
       input({

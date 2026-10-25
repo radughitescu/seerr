@@ -53,6 +53,21 @@ const SeasonSection = ({
   const deleted = season.status === 'deleted';
   const ready = season.episodes.filter((e) => e.status === 'on_plex').length;
   const total = season.episodes.length;
+  const since =
+    (season.status === 'deleted' || season.status === 'paused') &&
+    season.controlSince
+      ? intl.formatMessage(
+          deleted ? messages.seasonDeletedSince : messages.seasonPausedSince,
+          {
+            date: intl.formatDate(season.controlSince, {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+          }
+        )
+      : undefined;
 
   const releaseParts = season.release
     ? [
@@ -95,17 +110,21 @@ const SeasonSection = ({
           <span className="text-[13px] font-bold text-white">
             {seasonName(season.seasonNumber)}
           </span>
-          {!open && (
-            <StatusPill status={season.status}>
-              {intl.formatMessage(
-                deleted ? messages.seasonDeleted : messages.seasonStatus,
-                {
-                  status: intl.formatMessage(STATUS_LABELS[season.status]),
-                  ready,
-                  total,
-                }
-              )}
-            </StatusPill>
+          {since ? (
+            <StatusPill status={season.status}>{since}</StatusPill>
+          ) : (
+            !open && (
+              <StatusPill status={season.status}>
+                {intl.formatMessage(
+                  deleted ? messages.seasonDeleted : messages.seasonStatus,
+                  {
+                    status: intl.formatMessage(STATUS_LABELS[season.status]),
+                    ready,
+                    total,
+                  }
+                )}
+              </StatusPill>
+            )
           )}
           {open && releaseParts.length > 0 && (
             <span

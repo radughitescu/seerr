@@ -161,7 +161,6 @@ const RequestItemError = ({
                     is4k={requestData.is4k}
                     mediaType={requestData.type}
                     plexUrl={requestData.is4k ? plexUrl4k : plexUrl}
-                    disableLink
                     serviceUrl={
                       requestData.is4k
                         ? requestData.media.serviceUrl4k
@@ -619,7 +618,7 @@ const RequestItem = ({
                   tmdbId={requestData.media.tmdbId}
                   mediaType={requestData.type}
                   plexUrl={requestData.is4k ? plexUrl4k : plexUrl}
-                  disableLink
+                  disableLink={live}
                   serviceUrl={
                     requestData.is4k
                       ? requestData.media.serviceUrl4k

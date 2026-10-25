@@ -15,7 +15,12 @@ import {
 import { isExtraFile, mapFilesToEpisodes } from './fileMap';
 
 export type DeletePreview = {
-  files: { path: string; bytes: number; episodes: string[] }[];
+  files: {
+    path: string;
+    bytes: number;
+    freedBytes: number;
+    episodes: string[];
+  }[];
   bytesFreed: number;
   torrentKept: boolean;
 };
@@ -60,8 +65,14 @@ export async function getDeletePreview(
 
   if (isMovie) {
     for (const file of library) {
-      preview.files.push({ path: file.path, bytes: file.size, episodes: [] });
-      if (!kept.length) preview.bytesFreed += file.size;
+      const freedBytes = kept.length ? 0 : file.size;
+      preview.files.push({
+        path: file.path,
+        bytes: file.size,
+        freedBytes,
+        episodes: [],
+      });
+      preview.bytesFreed += freedBytes;
     }
   } else {
     const byId = new Map(library.map((f) => [f.id, f]));
@@ -85,12 +96,14 @@ export async function getDeletePreview(
               plan.episodeIds.has(e.id))
         )
       );
+      const freedBytes = hardlinked ? 0 : bytes;
       preview.files.push({
         path: file?.path ?? '',
         bytes,
+        freedBytes,
         episodes: covers.map((e) => episodeLabel(episodeKey(e))),
       });
-      if (!hardlinked) preview.bytesFreed += bytes;
+      preview.bytesFreed += freedBytes;
     }
   }
 
@@ -124,6 +137,7 @@ export async function getDeletePreview(
       preview.files.push({
         path: file.name,
         bytes: file.bytesCompleted,
+        freedBytes: file.bytesCompleted,
         episodes: keys.map(episodeLabel),
       });
     }

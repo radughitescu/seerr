@@ -85,11 +85,56 @@ export function serviceTarget(
   const kind: ServiceKind =
     request.type === MediaType.MOVIE ? 'radarr' : 'sonarr';
   const settings = getSettings();
+  const servers: DVRSettings[] =
+    kind === 'radarr' ? settings.radarr : settings.sonarr;
+  const mediaServiceId = request.is4k
+    ? request.media?.serviceId4k
+    : request.media?.serviceId;
   const server =
-    kind === 'radarr'
-      ? serverFor(settings.radarr, request)
-      : serverFor(settings.sonarr, request);
+    (mediaServiceId !== null && mediaServiceId !== undefined
+      ? servers.find((s) => s.id === mediaServiceId)
+      : undefined) ?? serverFor(servers, request);
   return { kind, serverId: server?.id, externalId };
+}
+
+export type ServarrRound = {
+  commands: Map<string, Promise<CommandResource[]>>;
+};
+
+export const newRound = (): ServarrRound => ({ commands: new Map() });
+
+const roundCommands = (
+  round: ServarrRound,
+  key: string,
+  load: () => Promise<CommandResource[]>
+): Promise<CommandResource[]> => {
+  let commands = round.commands.get(key);
+  if (!commands) {
+    commands = load();
+    round.commands.set(key, commands);
+  }
+  return commands;
+};
+
+export function torrentHashes(queue: QueueRecord[]): string[] {
+  const seen = new Set<string>();
+  const hashes: string[] = [];
+  for (const { downloadId } of queue) {
+    if (!downloadId || !TORRENT_HASH.test(downloadId)) continue;
+    const key = downloadId.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hashes.push(downloadId);
+  }
+  return hashes;
+}
+
+export async function loadTorrents(hashes: string[]): Promise<TorrentInfo[]> {
+  const settings = getSettings().transmission;
+  if (!settings.enabled || hashes.length === 0) {
+    return [];
+  }
+  return clients.transmission(settings).getTorrents(hashes);
 }
 
 export async function findRequest(
@@ -129,7 +174,8 @@ const searchBodies = (
     .map((c) => c.body ?? {});
 
 export async function loadRequestInputs(
-  request: MediaRequest
+  request: MediaRequest,
+  round: ServarrRound = newRound()
 ): Promise<RequestInputs> {
   const type = request.type === MediaType.MOVIE ? 'movie' : 'tv';
   const inputs: RequestInputs = {
@@ -162,7 +208,7 @@ export async function loadRequestInputs(
 
   if (target.kind === 'sonarr') {
     inputs.seriesId = externalId;
-    const server = serverFor(settings.sonarr, request);
+    const server = settings.sonarr.find((s) => s.id === target.serverId);
     if (!server) {
       failed.add('sonarr');
       logger.warn('No Sonarr server configured for request', {
@@ -181,7 +227,11 @@ export async function loadRequestInputs(
         settle('sonarr', failed, request.id, () =>
           sonarr.getQueueFor({ seriesId: externalId })
         ),
-        settle('sonarr', failed, request.id, () => sonarr.getCommands()),
+        settle('sonarr', failed, request.id, () =>
+          roundCommands(round, `sonarr:${server.id}`, () =>
+            sonarr.getCommands()
+          )
+        ),
       ]);
       const sizes = new Map((files ?? []).map((f) => [f.id, f.size]));
       const seasons = new Set(inputs.requestedSeasons);
@@ -209,7 +259,7 @@ export async function loadRequestInputs(
     }
   } else {
     inputs.movieId = externalId;
-    const server = serverFor(settings.radarr, request);
+    const server = settings.radarr.find((s) => s.id === target.serverId);
     if (!server) {
       failed.add('radarr');
       logger.warn('No Radarr server configured for request', {
@@ -228,7 +278,11 @@ export async function loadRequestInputs(
         settle('radarr', failed, request.id, () =>
           radarr.getQueueFor({ movieId: externalId })
         ),
-        settle('radarr', failed, request.id, () => radarr.getCommands()),
+        settle('radarr', failed, request.id, () =>
+          roundCommands(round, `radarr:${server.id}`, () =>
+            radarr.getCommands()
+          )
+        ),
       ]);
       if (movie) {
         inputs.movie = { monitored: movie.monitored, hasFile: movie.hasFile };
@@ -248,23 +302,12 @@ export async function loadRequestInputs(
 
   inputs.queue = queue ?? [];
 
-  if (settings.transmission.enabled) {
-    const hashes = [
-      ...new Set(
-        inputs.queue
-          .map((q) => q.downloadId)
-          .filter((id): id is string => !!id && TORRENT_HASH.test(id))
-      ),
-    ];
-    if (hashes.length) {
-      const torrents: TorrentInfo[] | undefined = await settle(
-        'transmission',
-        failed,
-        request.id,
-        () => clients.transmission(settings.transmission).getTorrents(hashes)
-      );
-      inputs.torrents = torrents ?? [];
-    }
+  const hashes = torrentHashes(inputs.queue);
+  if (settings.transmission.enabled && hashes.length) {
+    const torrents = await settle('transmission', failed, request.id, () =>
+      loadTorrents(hashes)
+    );
+    inputs.torrents = torrents ?? [];
   }
 
   inputs.failedSources = [...failed];
@@ -274,5 +317,6 @@ export async function loadRequestInputs(
 export const sources = {
   findRequest,
   loadRequestInputs,
+  loadTorrents,
   serviceTarget,
 };

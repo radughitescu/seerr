@@ -69,10 +69,15 @@ export function servarrEventTarget(
   return found.length ? found : 'all';
 }
 
+export const redactToken = (text: string): string =>
+  text.replace(/access_token=[^&\s]+/g, 'access_token=[redacted]');
+
 export const signalrLogger: ILogger = {
   log(level: LogLevel, message: string) {
-    if (level >= LogLevel.Warning) {
-      logger.debug(message, { label: 'LiveStatus' });
+    if (level >= LogLevel.Error) {
+      logger.warn(redactToken(message), { label: 'LiveStatus' });
+    } else if (level >= LogLevel.Warning) {
+      logger.debug(redactToken(message), { label: 'LiveStatus' });
     }
   },
 };
@@ -114,7 +119,9 @@ export function startServarrSignalR(onEvent: ServarrEventHandler): () => void {
         } catch (e) {
           logger.error('Live status event handler failed', {
             label: 'LiveStatus',
-            errorMessage: e instanceof Error ? e.message : String(e),
+            errorMessage: redactToken(
+              e instanceof Error ? e.message : String(e)
+            ),
           });
         }
       }
@@ -134,7 +141,9 @@ export function startServarrSignalR(onEvent: ServarrEventHandler): () => void {
           logger.warn(`Failed to connect to ${kind} SignalR`, {
             label: 'LiveStatus',
             server: server.name,
-            errorMessage: e instanceof Error ? e.message : String(e),
+            errorMessage: redactToken(
+              e instanceof Error ? e.message : String(e)
+            ),
           });
           const timer = setTimeout(() => {
             timers.delete(timer);

@@ -1,12 +1,20 @@
+import type { TorrentInfo } from '@server/api/transmission';
 import logger from '@server/logger';
 import { diffSnapshots } from './delta';
-import { deriveRequestState } from './derive';
+import { deriveRequestState, type RequestInputs } from './derive';
 import {
   servarrEventTarget,
   startServarrSignalR,
   type ServarrMessage,
 } from './signalr';
-import { sources, type ServiceKind, type ServiceTarget } from './sources';
+import {
+  newRound,
+  sources,
+  torrentHashes,
+  type ServarrRound,
+  type ServiceKind,
+  type ServiceTarget,
+} from './sources';
 import type { LiveDelta, RequestLiveState } from './types';
 
 export type LiveEvent =
@@ -16,6 +24,9 @@ export type LiveEvent =
 export type LiveListener = (e: LiveEvent) => void;
 
 export const POLL_INTERVAL_MS = 2000;
+export const FULL_ROUND_MS = 30000;
+
+const FULL_ROUND_TICKS = FULL_ROUND_MS / POLL_INTERVAL_MS;
 
 type Subscription = {
   ids: Set<number>;
@@ -29,9 +40,13 @@ const errorMessage = (e: unknown) =>
 export class LiveStatusHub {
   private subscriptions = new Set<Subscription>();
   private states = new Map<number, RequestLiveState>();
+  private inputs = new Map<number, RequestInputs>();
   private targets = new Map<number, ServiceTarget>();
+  private lastFullRound = new Map<number, number>();
   private running = new Map<number, Promise<void>>();
   private queued = new Map<number, Promise<void>>();
+  private torrentPoll?: Promise<void>;
+  private tickCount = 0;
   private timer?: ReturnType<typeof setInterval>;
   private stopServarrSignalR?: () => void;
   private servarrStarted = false;
@@ -44,6 +59,7 @@ export class LiveStatusHub {
     };
     this.subscriptions.add(sub);
 
+    const round = newRound();
     for (const id of sub.ids) {
       const cached = this.states.get(id);
       if (cached) {
@@ -51,7 +67,7 @@ export class LiveStatusHub {
       } else {
         sub.pending.add(id);
         if (!this.running.has(id)) {
-          void this.run(id);
+          void this.run(id, round);
         }
       }
     }
@@ -67,8 +83,7 @@ export class LiveStatusHub {
       this.subscriptions.delete(sub);
       for (const id of sub.ids) {
         if (!this.isSubscribed(id)) {
-          this.states.delete(id);
-          this.targets.delete(id);
+          this.forget(id);
         }
       }
       if (this.subscriptions.size === 0) {
@@ -77,20 +92,20 @@ export class LiveStatusHub {
     };
   }
 
-  public refresh(requestId: number): Promise<void> {
+  public refresh(requestId: number, round?: ServarrRound): Promise<void> {
     if (!this.isSubscribed(requestId)) {
       return Promise.resolve();
     }
     const current = this.running.get(requestId);
     if (!current) {
-      return this.run(requestId);
+      return this.run(requestId, round ?? newRound());
     }
     let next = this.queued.get(requestId);
     if (!next) {
       next = current.then(() => {
         this.queued.delete(requestId);
         if (!this.isSubscribed(requestId)) return;
-        return this.running.get(requestId) ?? this.run(requestId);
+        return this.running.get(requestId) ?? this.run(requestId, newRound());
       });
       this.queued.set(requestId, next);
     }
@@ -110,7 +125,8 @@ export class LiveStatusHub {
           t.serverId === undefined ||
           t.serverId === serverId)
     );
-    await Promise.all(ids.map((id) => this.refresh(id)));
+    const round = newRound();
+    await Promise.all(ids.map((id) => this.refresh(id, round)));
   }
 
   public handleServarrEvent(
@@ -126,7 +142,8 @@ export class LiveStatusHub {
           t.kind === kind &&
           (t.serverId === undefined || t.serverId === serverId)
       );
-      void Promise.all(ids.map((id) => this.refresh(id)));
+      const round = newRound();
+      void Promise.all(ids.map((id) => this.refresh(id, round)));
       return;
     }
     void Promise.all(
@@ -156,7 +173,9 @@ export class LiveStatusHub {
     this.servarrStarted = false;
     this.subscriptions.clear();
     this.states.clear();
+    this.inputs.clear();
     this.targets.clear();
+    this.lastFullRound.clear();
   }
 
   private connectServarr(): void {
@@ -191,6 +210,13 @@ export class LiveStatusHub {
     }
   }
 
+  private forget(requestId: number): void {
+    this.states.delete(requestId);
+    this.inputs.delete(requestId);
+    this.targets.delete(requestId);
+    this.lastFullRound.delete(requestId);
+  }
+
   private subscribedIds(): Set<number> {
     const ids = new Set<number>();
     for (const sub of this.subscriptions) {
@@ -214,15 +240,98 @@ export class LiveStatusHub {
   }
 
   private tick(): void {
+    this.tickCount++;
+    const due: number[] = [];
+    const polled: number[] = [];
     for (const id of this.subscribedIds()) {
-      if (!this.running.has(id)) {
-        void this.run(id);
+      if (this.running.has(id)) continue;
+      const last = this.lastFullRound.get(id);
+      if (last === undefined || this.tickCount - last >= FULL_ROUND_TICKS) {
+        due.push(id);
+      } else {
+        polled.push(id);
       }
+    }
+
+    if (due.length) {
+      const round = newRound();
+      for (const id of due) {
+        void this.run(id, round);
+      }
+    }
+
+    if (polled.length && !this.torrentPoll) {
+      this.torrentPoll = this.pollTorrents(polled)
+        .catch((e) => {
+          logger.error('Live status torrent poll failed', {
+            label: 'LiveStatus',
+            errorMessage: errorMessage(e),
+          });
+        })
+        .finally(() => {
+          this.torrentPoll = undefined;
+        });
     }
   }
 
-  private run(requestId: number): Promise<void> {
-    const promise = this.load(requestId)
+  private async pollTorrents(ids: number[]): Promise<void> {
+    const watched: {
+      id: number;
+      inputs: RequestInputs;
+      hashes: Set<string>;
+    }[] = [];
+    const all = new Map<string, string>();
+    for (const id of ids) {
+      const inputs = this.inputs.get(id);
+      if (!inputs) continue;
+      const hashes = torrentHashes(inputs.queue);
+      if (!hashes.length) continue;
+      for (const hash of hashes) all.set(hash.toLowerCase(), hash);
+      watched.push({
+        id,
+        inputs,
+        hashes: new Set(hashes.map((h) => h.toLowerCase())),
+      });
+    }
+    if (!all.size) return;
+
+    let torrents: TorrentInfo[] | undefined;
+    try {
+      torrents = await sources.loadTorrents([...all.values()]);
+    } catch (e) {
+      logger.warn('Failed to poll Transmission for live status', {
+        label: 'LiveStatus',
+        errorMessage: errorMessage(e),
+      });
+    }
+
+    const now = new Date().toISOString();
+    for (const { id, inputs, hashes } of watched) {
+      if (
+        !this.isSubscribed(id) ||
+        this.running.has(id) ||
+        this.inputs.get(id) !== inputs
+      ) {
+        continue;
+      }
+      const others = inputs.failedSources.filter((s) => s !== 'transmission');
+      const next: RequestInputs = torrents
+        ? {
+            ...inputs,
+            now,
+            torrents: torrents.filter((t) =>
+              hashes.has(t.hashString.toLowerCase())
+            ),
+            failedSources: others,
+          }
+        : { ...inputs, now, failedSources: [...others, 'transmission'] };
+      this.inputs.set(id, next);
+      this.apply(id, deriveRequestState(next));
+    }
+  }
+
+  private run(requestId: number, round: ServarrRound): Promise<void> {
+    const promise = this.load(requestId, round)
       .catch((e) => {
         logger.error('Live status refresh failed', {
           label: 'LiveStatus',
@@ -237,8 +346,9 @@ export class LiveStatusHub {
     return promise;
   }
 
-  private async load(requestId: number): Promise<void> {
+  private async load(requestId: number, round: ServarrRound): Promise<void> {
     let next: RequestLiveState;
+    let inputs: RequestInputs | undefined;
     let target: ServiceTarget | undefined;
     try {
       const request = await sources.findRequest(requestId);
@@ -246,7 +356,8 @@ export class LiveStatusHub {
         next = this.unavailable(requestId);
       } else {
         target = sources.serviceTarget(request);
-        next = deriveRequestState(await sources.loadRequestInputs(request));
+        inputs = await sources.loadRequestInputs(request, round);
+        next = deriveRequestState(inputs);
       }
     } catch (e) {
       logger.warn('Failed to load live request status', {
@@ -260,7 +371,19 @@ export class LiveStatusHub {
     if (!this.isSubscribed(requestId)) return;
     if (target) {
       this.targets.set(requestId, target);
+    } else {
+      this.targets.delete(requestId);
     }
+    if (inputs) {
+      this.inputs.set(requestId, inputs);
+    } else {
+      this.inputs.delete(requestId);
+    }
+    this.lastFullRound.set(requestId, this.tickCount);
+    this.apply(requestId, next);
+  }
+
+  private apply(requestId: number, next: RequestLiveState): void {
     const prev = this.states.get(requestId);
     this.states.set(requestId, next);
     this.publish(requestId, prev, next);

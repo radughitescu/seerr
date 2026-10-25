@@ -12,7 +12,13 @@ import type {
 } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import { setupTestDb } from '@server/test/db';
-import { clients, loadRequestInputs } from './sources';
+import {
+  clients,
+  loadRequestInputs,
+  loadTorrents,
+  newRound,
+  serviceTarget,
+} from './sources';
 
 const HASH = 'A'.repeat(40);
 
@@ -378,5 +384,80 @@ describe('loadRequestInputs', () => {
 
     assert.equal(build.mock.callCount(), 0);
     assert.deepEqual(result.failedSources, ['sonarr']);
+  });
+
+  it('uses media.serviceId server when the default server differs', async () => {
+    const sonarr = fakeSonarr();
+    const build = mock.method(
+      clients,
+      'sonarr',
+      (() => sonarr) as unknown as typeof clients.sonarr
+    );
+
+    await loadRequestInputs(
+      tvRequest({ media: { externalServiceId: 42, serviceId: 1 } })
+    );
+
+    assert.equal(build.mock.calls[0].arguments[0].id, 1);
+    assert.equal(
+      serviceTarget(
+        tvRequest({
+          serverId: 0,
+          media: { externalServiceId: 42, serviceId: 1 },
+        })
+      )?.serverId,
+      1
+    );
+    assert.equal(
+      serviceTarget(
+        tvRequest({ media: { externalServiceId: 42, serviceId: 9 } })
+      )?.serverId,
+      0
+    );
+    assert.equal(
+      serviceTarget(
+        tvRequest({
+          is4k: true,
+          serverId: 0,
+          media: { externalServiceId4k: 77, serviceId: 0, serviceId4k: 1 },
+        })
+      )?.serverId,
+      1
+    );
+  });
+
+  it('dedupes getCommands per server within one round', async () => {
+    const sonarr = fakeSonarr();
+    mock.method(
+      clients,
+      'sonarr',
+      (() => sonarr) as unknown as typeof clients.sonarr
+    );
+
+    const round = newRound();
+    const [a, b] = await Promise.all([
+      loadRequestInputs(tvRequest({ id: 1 }), round),
+      loadRequestInputs(tvRequest({ id: 3 }), round),
+    ]);
+    assert.equal(sonarr.getCommands.mock.callCount(), 1);
+    assert.deepEqual(a.runningSearches, b.runningSearches);
+
+    await loadRequestInputs(tvRequest({ id: 1 }));
+    assert.equal(sonarr.getCommands.mock.callCount(), 2);
+  });
+
+  it('loadTorrents skips transmission when disabled or given no hashes', async () => {
+    assert.deepEqual(await loadTorrents([]), []);
+    assert.equal(getTorrents.mock.callCount(), 0);
+
+    assert.equal((await loadTorrents([HASH])).length, 1);
+    assert.equal(getTorrents.mock.callCount(), 1);
+
+    getSettings().transmission = {
+      ...getSettings().transmission,
+      enabled: false,
+    };
+    assert.deepEqual(await loadTorrents([HASH]), []);
+    assert.equal(getTorrents.mock.callCount(), 1);
   });
 });

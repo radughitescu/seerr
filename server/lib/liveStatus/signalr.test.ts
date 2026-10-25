@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 
-import { HubConnectionBuilder, type HubConnection } from '@microsoft/signalr';
+import {
+  HubConnectionBuilder,
+  LogLevel,
+  type HubConnection,
+} from '@microsoft/signalr';
 import type { RadarrSettings, SonarrSettings } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
+import logger from '@server/logger';
 import {
   reconnectPolicy,
   servarrEventTarget,
+  signalrLogger,
   startServarrSignalR,
   type ServarrMessage,
 } from './signalr';
@@ -77,6 +83,30 @@ describe('servarrEventTarget', () => {
   it('ignores other events', () => {
     assert.equal(servarrEventTarget({ name: 'health', body: {} }), null);
     assert.equal(servarrEventTarget({ name: 'queue/status', body: {} }), null);
+  });
+
+  it('logs signalr errors as warnings with the token redacted', () => {
+    const warn = mock.method(logger, 'warn', () => logger);
+    const debug = mock.method(logger, 'debug', () => logger);
+    try {
+      signalrLogger.log(
+        LogLevel.Error,
+        'Failed http://h/signalr/messages?access_token=secret&x=1'
+      );
+      signalrLogger.log(LogLevel.Critical, 'critical');
+      signalrLogger.log(LogLevel.Warning, 'warning');
+      signalrLogger.log(LogLevel.Information, 'info');
+
+      assert.equal(warn.mock.callCount(), 2);
+      assert.equal(
+        warn.mock.calls[0].arguments[0],
+        'Failed http://h/signalr/messages?access_token=[redacted]&x=1'
+      );
+      assert.equal(debug.mock.callCount(), 1);
+      assert.equal(debug.mock.calls[0].arguments[0], 'warning');
+    } finally {
+      mock.restoreAll();
+    }
   });
 
   it('keeps reconnecting after the default steps', () => {

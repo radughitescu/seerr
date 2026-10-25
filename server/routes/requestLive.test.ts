@@ -216,6 +216,25 @@ describe('POST /request/:requestId/control', () => {
     assert.strictEqual(args.episodeNumber, 2);
   });
 
+  it("MANAGE_REQUESTS user can POST control on another user's request", async () => {
+    const mediaRequest = await seedRequest('admin@seerr.dev');
+    await grant(
+      'demo@seerr.dev',
+      Permission.REQUEST | Permission.MANAGE_REQUESTS
+    );
+    const run = mock.method(
+      actions,
+      'runAction',
+      async (input: ActionRequest) => liveState(input.request.id)
+    );
+    const agent = await loginAs('demo@seerr.dev');
+    const res = await agent
+      .post(`/request/${mediaRequest.id}/control`)
+      .send({ action: 'pause', seasonNumber: 1 });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(run.mock.callCount(), 1);
+  });
+
   it('user without view rights gets 403', async () => {
     const mediaRequest = await seedRequest('admin@seerr.dev');
     const run = mock.method(
@@ -279,6 +298,21 @@ describe('GET /request/:requestId/control/delete-preview', () => {
   afterEach(() => {
     mock.restoreAll();
     stubSubscribers();
+  });
+
+  it('delete-preview returns 403 for a user without view rights', async () => {
+    const mediaRequest = await seedRequest('admin@seerr.dev');
+    const get = mock.method(previews, 'getDeletePreview', async () => ({
+      files: [],
+      bytesFreed: 0,
+      torrentKept: false,
+    }));
+    const agent = await loginAs('demo@seerr.dev');
+    const res = await agent.get(
+      `/request/${mediaRequest.id}/control/delete-preview?seasonNumber=1`
+    );
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual(get.mock.callCount(), 0);
   });
 
   it('returns the preview for the requested item', async () => {

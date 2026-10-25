@@ -78,6 +78,15 @@ export interface QueueRecord {
   sizeleft: number;
 }
 
+export interface HistoryRecord {
+  id: number;
+  episodeId?: number;
+  movieId?: number;
+  downloadId?: string;
+  eventType: string;
+  date?: string;
+}
+
 export interface CommandResource {
   id: number;
   name: string;

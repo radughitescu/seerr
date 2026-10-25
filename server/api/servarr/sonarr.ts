@@ -1,5 +1,6 @@
 import logger from '@server/logger';
 import type { AxiosResponse } from 'axios';
+import type { HistoryRecord } from './base';
 import ServarrBase from './base';
 
 export interface SonarrSeason {
@@ -470,6 +471,23 @@ class SonarrAPI extends ServarrBase<{
         seriesId,
       });
       throw new Error('Failed to get episode files', { cause: e });
+    }
+  }
+
+  public async getSeriesHistory(seriesId: number): Promise<HistoryRecord[]> {
+    try {
+      const response = await this.axios.get<HistoryRecord[]>(
+        '/history/series',
+        { params: { seriesId, includeEpisode: false } }
+      );
+      return response.data;
+    } catch (e) {
+      logger.error('Failed to retrieve series history', {
+        label: 'Sonarr API',
+        errorMessage: e.message,
+        seriesId,
+      });
+      throw new Error('Failed to get series history', { cause: e });
     }
   }
 

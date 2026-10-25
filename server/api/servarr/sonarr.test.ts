@@ -276,4 +276,20 @@ describe('SonarrAPI request controls', () => {
     assert.strictEqual(get.mock.calls[0].arguments[0], '/command');
     assert.deepStrictEqual(result, [{ id: 1 }]);
   });
+
+  it('getSeriesHistory GETs /history/series for the item', async () => {
+    const api = buildSonarr();
+    const records = [{ id: 1, downloadId: 'abc', eventType: 'grabbed' }];
+    const get = mock.method(getAxios(api), 'get', async () => ({
+      data: records,
+    }));
+
+    const result = await api.getSeriesHistory(5);
+
+    assert.deepStrictEqual(get.mock.calls[0].arguments, [
+      '/history/series',
+      { params: { seriesId: 5, includeEpisode: false } },
+    ]);
+    assert.deepStrictEqual(result, records);
+  });
 });

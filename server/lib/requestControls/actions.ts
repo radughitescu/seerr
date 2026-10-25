@@ -1,4 +1,4 @@
-import type { QueueRecord } from '@server/api/servarr/base';
+import type { HistoryRecord, QueueRecord } from '@server/api/servarr/base';
 import type RadarrAPI from '@server/api/servarr/radarr';
 import type SonarrAPI from '@server/api/servarr/sonarr';
 import type TransmissionAPI from '@server/api/transmission';
@@ -15,6 +15,7 @@ import { liveStatusHub } from '@server/lib/liveStatus/hub';
 import {
   clients,
   loadRequestInputs,
+  loadTorrents,
   serviceTarget,
   torrentHashes,
   type ServiceTarget,
@@ -89,12 +90,21 @@ export type TorrentPlan = {
   queueIds: number[];
 };
 
+export type DownloadLinks = {
+  byHash: Map<string, Set<number>>;
+  unattributed: Set<string>;
+  hashes: Map<string, string>;
+};
+
 export type ActionContext = {
   request: MediaRequest;
   scope: Scope;
   target: ServiceTarget;
   inputs: RequestInputs;
   state: RequestLiveState;
+  known: TorrentInfo[];
+  links: DownloadLinks;
+  base: Episode[];
   episodes: Episode[];
   torrents: TorrentPlan[];
 };
@@ -160,27 +170,69 @@ function radarrFor(target: ServiceTarget): RadarrAPI {
 const transmission = (): TransmissionAPI =>
   clients.transmission(getSettings().transmission);
 
+const HISTORY_EVENTS = new Set(['grabbed', 'downloadFolderImported']);
+
+const isTorrentHash = (downloadId?: string) =>
+  !!downloadId && torrentHashes([{ downloadId } as QueueRecord]).length > 0;
+
+const sortEpisodes = (episodes: Episode[]) =>
+  [...episodes].sort(
+    (a, b) =>
+      a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber
+  );
+
 export function scopedEpisodes(inputs: RequestInputs, scope: Scope): Episode[] {
-  return inputs.episodes
-    .filter(
+  return sortEpisodes(
+    inputs.episodes.filter(
       (e) =>
         (scope.seasonNumber === null ||
           e.seasonNumber === scope.seasonNumber) &&
         (scope.episodeNumber === null ||
           e.episodeNumber === scope.episodeNumber)
     )
-    .sort(
-      (a, b) =>
-        a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber
-    );
+  );
+}
+
+export function linkDownloads(
+  inputs: RequestInputs,
+  history: HistoryRecord[]
+): DownloadLinks {
+  const links: DownloadLinks = {
+    byHash: new Map(),
+    unattributed: new Set(),
+    hashes: new Map(),
+  };
+  const add = (downloadId: string, id: number | undefined) => {
+    const hash = downloadId.toLowerCase();
+    if (!links.hashes.has(hash)) links.hashes.set(hash, downloadId);
+    const set = links.byHash.get(hash) ?? new Set<number>();
+    links.byHash.set(hash, set);
+    if (id === undefined) {
+      links.unattributed.add(hash);
+    } else {
+      set.add(id);
+    }
+  };
+  const movie = inputs.type === 'movie';
+  for (const q of inputs.queue) {
+    if (isTorrentHash(q.downloadId)) {
+      add(q.downloadId, movie ? q.movieId : q.episodeId);
+    }
+  }
+  for (const h of history) {
+    if (!HISTORY_EVENTS.has(h.eventType) || !isTorrentHash(h.downloadId)) {
+      continue;
+    }
+    add(h.downloadId as string, movie ? h.movieId : h.episodeId);
+  }
+  return links;
 }
 
 const recordsFor = (queue: QueueRecord[], hash: string) =>
   queue.filter((q) => q.downloadId?.toLowerCase() === hash.toLowerCase());
 
 export function planTorrents(
-  inputs: RequestInputs,
-  scope: Scope,
+  ctx: Pick<ActionContext, 'inputs' | 'known' | 'links'>,
   episodes: Episode[]
 ): TorrentPlan[] {
   const ids = new Set(
@@ -189,11 +241,13 @@ export function planTorrents(
   const keys = new Set(episodes.map(episodeKey));
   const plans: TorrentPlan[] = [];
 
-  for (const torrent of inputs.torrents) {
-    const records = recordsFor(inputs.queue, torrent.hashString);
-    const queueIds = unique(records.map((r) => r.id));
+  for (const torrent of ctx.known) {
+    const hash = torrent.hashString.toLowerCase();
+    const queueIds = unique(
+      recordsFor(ctx.inputs.queue, hash).map((r) => r.id)
+    );
 
-    if (inputs.type === 'movie') {
+    if (ctx.inputs.type === 'movie') {
       plans.push({
         torrent,
         covered: true,
@@ -206,15 +260,13 @@ export function planTorrents(
       continue;
     }
 
+    const linked = ctx.links.byHash.get(hash) ?? new Set<number>();
     const map = mapFilesToEpisodes(torrent.files);
     const keyIndexes = new Map([...map].filter(([key]) => keys.has(key)));
     const episodeIds = new Set<number>();
     for (const e of episodes) {
       if (e.id === undefined) continue;
-      if (
-        keyIndexes.has(episodeKey(e)) ||
-        records.some((r) => r.episodeId === e.id)
-      ) {
+      if (keyIndexes.has(episodeKey(e)) || linked.has(e.id)) {
         episodeIds.add(e.id);
       }
     }
@@ -224,10 +276,12 @@ export function planTorrents(
     const unmappedMedia = torrent.files.some(
       (f) => !mapped.has(f.index) && !isExtraFile(f.name)
     );
+    const linkedInScope =
+      linked.size > 0 && [...linked].every((id) => ids.has(id));
     const covered =
+      !ctx.links.unattributed.has(hash) &&
       [...map.keys()].every((key) => keys.has(key)) &&
-      records.every((r) => r.episodeId !== undefined && ids.has(r.episodeId)) &&
-      (!unmappedMedia || (scope.episodeNumber === null && records.length > 0));
+      (linked.size > 0 ? linkedInScope : !unmappedMedia);
 
     plans.push({
       torrent,
@@ -243,8 +297,9 @@ export function planTorrents(
   return plans;
 }
 
-export function expandForDelete(
+export function expandByFiles(
   inputs: RequestInputs,
+  known: TorrentInfo[],
   episodes: Episode[]
 ): Episode[] {
   const byKey = new Map(inputs.episodes.map((e) => [episodeKey(e), e]));
@@ -261,7 +316,7 @@ export function expandForDelete(
   }
   groups.push(...byFile.values());
 
-  for (const torrent of inputs.torrents) {
+  for (const torrent of known) {
     const byIndex = new Map<number, string[]>();
     for (const [key, indexes] of mapFilesToEpisodes(torrent.files)) {
       for (const index of indexes) {
@@ -286,10 +341,32 @@ export function expandForDelete(
     }
   }
 
-  return [...result.values()].sort(
-    (a, b) =>
-      a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber
-  );
+  return sortEpisodes([...result.values()]);
+}
+
+export function withEpisodes(
+  ctx: ActionContext,
+  episodes: Episode[]
+): ActionContext {
+  return { ...ctx, episodes, torrents: planTorrents(ctx, episodes) };
+}
+
+export function expanded(ctx: ActionContext): ActionContext {
+  if (!isTv(ctx.request)) return ctx;
+  return withEpisodes(ctx, expandByFiles(ctx.inputs, ctx.known, ctx.base));
+}
+
+export const deleteContext = expanded;
+
+async function loadHistory(
+  request: MediaRequest,
+  target: ServiceTarget
+): Promise<HistoryRecord[]> {
+  const id = target.externalId;
+  if (isTv(request)) {
+    return call('sonarr', () => sonarrFor(target).getSeriesHistory(id));
+  }
+  return call('radarr', () => radarrFor(target).getMovieHistory(id));
 }
 
 export async function loadContext(
@@ -304,12 +381,9 @@ export async function loadContext(
     );
   }
   const inputs = await loadRequestInputs(request);
-  if (inputs.failedSources.length) {
-    const service = inputs.failedSources[0];
-    throw new ServiceError(
-      service,
-      `${SERVICE_LABEL[service]} is unavailable.`
-    );
+  const fatal = inputs.failedSources.find((s) => s !== 'transmission');
+  if (fatal) {
+    throw new ServiceError(fatal, `${SERVICE_LABEL[fatal]} is unavailable.`);
   }
   if (
     scope.seasonNumber !== null &&
@@ -317,19 +391,62 @@ export async function loadContext(
   ) {
     throw new ActionError(400, 'This season is not part of the request.');
   }
-  const episodes = isTv(request) ? scopedEpisodes(inputs, scope) : [];
-  if (scope.episodeNumber !== null && episodes.length === 0) {
+  const base = isTv(request) ? scopedEpisodes(inputs, scope) : [];
+  if (scope.episodeNumber !== null && base.length === 0) {
     throw new ActionError(400, 'This episode is not part of the request.');
   }
-  return {
+
+  const links = linkDownloads(inputs, await loadHistory(request, target));
+  const known = [...inputs.torrents];
+  let transmissionDown = inputs.failedSources.includes('transmission');
+  const loaded = new Set(known.map((t) => t.hashString.toLowerCase()));
+  const queued = new Set(
+    inputs.queue
+      .map((q) => q.downloadId?.toLowerCase())
+      .filter((h): h is string => !!h)
+  );
+  const extra = [...links.hashes]
+    .filter(([hash]) => !loaded.has(hash) && !queued.has(hash))
+    .map(([, original]) => original);
+  if (!transmissionDown && extra.length && getSettings().transmission.enabled) {
+    try {
+      known.push(...(await loadTorrents(extra)));
+    } catch (e) {
+      logger.warn('Failed to load torrents from history for request control', {
+        label: 'Request Controls',
+        requestId: request.id,
+        errorMessage: errorMessage(e),
+      });
+      transmissionDown = true;
+    }
+  }
+
+  if (transmissionDown) {
+    const ids = new Set(idsOf(base));
+    const needed = isTv(request)
+      ? links.unattributed.size > 0 ||
+        [...links.byHash.values()].some((set) =>
+          [...set].some((id) => ids.has(id))
+        )
+      : links.hashes.size > 0;
+    if (needed) {
+      throw new ServiceError('transmission', 'Transmission is unavailable.');
+    }
+  }
+
+  const ctx: ActionContext = {
     request,
     scope,
     target,
     inputs,
     state: deriveRequestState(inputs),
-    episodes,
-    torrents: planTorrents(inputs, scope, episodes),
+    known,
+    links,
+    base,
+    episodes: base,
+    torrents: [],
   };
+  return withEpisodes(ctx, base);
 }
 
 function scopeItem(
@@ -396,16 +513,33 @@ export function alreadyDone(
   }
 }
 
-const pendingEpisodes = (ctx: ActionContext) =>
-  ctx.episodes.filter((e) => !e.hasFile);
-
 const idsOf = (episodes: Episode[]) =>
   episodes.map((e) => e.id).filter((id): id is number => id !== undefined);
 
-const indexesFor = (plan: TorrentPlan, episodes: Episode[]) =>
-  plan.keyIndexes.size === 0 && plan.episodeIds.size === 0
-    ? plan.fileIndexes
-    : unique(episodes.flatMap((e) => plan.keyIndexes.get(episodeKey(e)) ?? []));
+const controlOf = (ctx: ActionContext, e: Episode) =>
+  effectiveState(ctx.inputs.controls, e.seasonNumber, e.episodeNumber);
+
+const notDeleted = (ctx: ActionContext) =>
+  ctx.episodes.filter((e) => !e.hasFile && controlOf(ctx, e) !== 'deleted');
+
+const uncontrolled = (ctx: ActionContext) =>
+  ctx.episodes.filter((e) => !e.hasFile && controlOf(ctx, e) === null);
+
+const holding = (ctx: ActionContext, targets: Episode[]) =>
+  isTv(ctx.request)
+    ? ctx.torrents.filter((p) =>
+        targets.some((e) => e.id !== undefined && p.episodeIds.has(e.id))
+      )
+    : ctx.torrents;
+
+const indexesFor = (
+  ctx: ActionContext,
+  plan: TorrentPlan,
+  episodes: Episode[]
+) =>
+  isTv(ctx.request)
+    ? unique(episodes.flatMap((e) => plan.keyIndexes.get(episodeKey(e)) ?? []))
+    : plan.fileIndexes;
 
 const wanted = (plan: TorrentPlan, indexes: number[], value: boolean) =>
   indexes.filter((i) => (plan.torrent.fileStats[i]?.wanted ?? true) === value);
@@ -430,30 +564,18 @@ async function setMonitored(
   }
 }
 
-function missingEpisodes(ctx: ActionContext): Episode[] {
-  const transmissionEnabled = getSettings().transmission.enabled;
-  const elsewhere = (q: QueueRecord) =>
-    !transmissionEnabled || torrentHashes([q]).length === 0;
-  return pendingEpisodes(ctx).filter(
-    (e) =>
-      e.id !== undefined &&
-      !ctx.torrents.some((p) => p.episodeIds.has(e.id as number)) &&
-      !ctx.inputs.queue.some((q) => q.episodeId === e.id && elsewhere(q))
-  );
-}
+const queuedElsewhere = (q: QueueRecord) =>
+  !getSettings().transmission.enabled || !isTorrentHash(q.downloadId);
 
 function movieNeedsSearch(ctx: ActionContext): boolean {
-  const transmissionEnabled = getSettings().transmission.enabled;
   return (
     !ctx.inputs.movie?.hasFile &&
-    ctx.torrents.length === 0 &&
-    !ctx.inputs.queue.some(
-      (q) => !transmissionEnabled || torrentHashes([q]).length === 0
-    )
+    !ctx.torrents.some((p) => p.queueIds.length > 0) &&
+    !ctx.inputs.queue.some(queuedElsewhere)
   );
 }
 
-async function search(ctx: ActionContext): Promise<void> {
+async function search(ctx: ActionContext, targets: Episode[]): Promise<void> {
   if (!isTv(ctx.request)) {
     if (movieNeedsSearch(ctx)) {
       const movieId = ctx.target.externalId;
@@ -461,7 +583,14 @@ async function search(ctx: ActionContext): Promise<void> {
     }
     return;
   }
-  const missing = missingEpisodes(ctx);
+  const missing = targets.filter(
+    (e) =>
+      e.id !== undefined &&
+      !ctx.torrents.some(
+        (p) => p.queueIds.length > 0 && p.episodeIds.has(e.id as number)
+      ) &&
+      !ctx.inputs.queue.some((q) => q.episodeId === e.id && queuedElsewhere(q))
+  );
   if (!missing.length) return;
   const seriesId = ctx.target.externalId;
   const episodeIds: number[] = [];
@@ -489,11 +618,11 @@ async function search(ctx: ActionContext): Promise<void> {
   }
 }
 
-async function rewant(ctx: ActionContext, episodes: Episode[]): Promise<void> {
+async function rewant(ctx: ActionContext, targets: Episode[]): Promise<void> {
   const start: string[] = [];
-  for (const plan of ctx.torrents) {
+  for (const plan of holding(ctx, targets)) {
     const hash = plan.torrent.hashString;
-    const indexes = wanted(plan, indexesFor(plan, episodes), false);
+    const indexes = wanted(plan, indexesFor(ctx, plan, targets), false);
     if (indexes.length) {
       await call('transmission', () =>
         transmission().setFilesWanted(hash, indexes, true)
@@ -514,6 +643,17 @@ const itemKey = (ctx: ActionContext): ItemKey => ({
   episodeNumber: ctx.scope.episodeNumber,
 });
 
+const extraKeys = (ctx: ActionContext): ItemKey[] => {
+  const original = new Set(ctx.base.map(episodeKey));
+  return ctx.episodes
+    .filter((e) => !original.has(episodeKey(e)))
+    .map((e) => ({
+      requestId: ctx.request.id,
+      seasonNumber: e.seasonNumber,
+      episodeNumber: e.episodeNumber,
+    }));
+};
+
 const layoutOf = (inputs: RequestInputs): ControlLayout =>
   inputs.requestedSeasons.map((seasonNumber) => ({
     seasonNumber,
@@ -523,37 +663,39 @@ const layoutOf = (inputs: RequestInputs): ControlLayout =>
   }));
 
 async function prioritize(ctx: ActionContext): Promise<void> {
-  const hashes = ctx.torrents.map((p) => p.torrent.hashString);
+  const targets = uncontrolled(ctx);
+  const plans = holding(ctx, targets);
+  const hashes = plans.map((p) => p.torrent.hashString);
   if (hashes.length) {
     await call('transmission', () => transmission().queueMoveTop(hashes));
     await call('transmission', () =>
       transmission().setBandwidthPriorityHigh(hashes)
     );
   }
-  for (const plan of ctx.torrents) {
+  for (const plan of plans) {
     if (plan.covered) continue;
-    const indexes = indexesFor(plan, pendingEpisodes(ctx));
+    const indexes = indexesFor(ctx, plan, targets);
     if (indexes.length) {
       await call('transmission', () =>
         transmission().setFilePriorityHigh(plan.torrent.hashString, indexes)
       );
     }
   }
-  await search(ctx);
+  await search(ctx, targets);
 }
 
 async function pause(ctx: ActionContext, user: User, percent?: number) {
-  const pending = pendingEpisodes(ctx);
-  await setMonitored(ctx, pending, false);
+  const targets = notDeleted(ctx);
+  await setMonitored(ctx, targets, false);
 
   const stop: string[] = [];
-  for (const plan of ctx.torrents) {
+  for (const plan of holding(ctx, targets)) {
     const hash = plan.torrent.hashString;
     if (plan.covered) {
       if (plan.torrent.status !== 0) stop.push(hash);
       continue;
     }
-    const indexes = wanted(plan, indexesFor(plan, pending), true);
+    const indexes = wanted(plan, indexesFor(ctx, plan, targets), true);
     if (indexes.length) {
       await call('transmission', () =>
         transmission().setFilesWanted(hash, indexes, false)
@@ -565,35 +707,32 @@ async function pause(ctx: ActionContext, user: User, percent?: number) {
   }
 
   await setControl(itemKey(ctx), 'paused', user.id, percent);
+  for (const key of extraKeys(ctx)) {
+    await setControl(key, 'paused', user.id, percent);
+  }
 }
 
 async function resume(ctx: ActionContext) {
-  const pending = pendingEpisodes(ctx);
-  await setMonitored(ctx, pending, true);
-  await rewant(ctx, pending);
-  await search(ctx);
-  await releaseControl(itemKey(ctx), layoutOf(ctx.inputs));
+  const targets = notDeleted(ctx);
+  await setMonitored(ctx, targets, true);
+  await rewant(ctx, targets);
+  await search(ctx, targets);
+  const layout = layoutOf(ctx.inputs);
+  await releaseControl(itemKey(ctx), layout, { keepDeleted: true });
+  for (const key of extraKeys(ctx)) {
+    await releaseControl(key, layout, { keepDeleted: true });
+  }
 }
 
 async function restore(ctx: ActionContext) {
+  const pending = ctx.episodes.filter((e) => !e.hasFile);
   await setMonitored(ctx, ctx.episodes, true);
-  await rewant(ctx, pendingEpisodes(ctx));
-  await search(ctx);
+  await rewant(ctx, pending);
+  await search(ctx, pending);
   await releaseControl(itemKey(ctx), layoutOf(ctx.inputs));
 }
 
-export function deleteContext(ctx: ActionContext): ActionContext {
-  if (!isTv(ctx.request)) return ctx;
-  const episodes = expandForDelete(ctx.inputs, ctx.episodes);
-  return {
-    ...ctx,
-    episodes,
-    torrents: planTorrents(ctx.inputs, ctx.scope, episodes),
-  };
-}
-
-async function remove(base: ActionContext, user: User) {
-  const ctx = deleteContext(base);
+async function remove(ctx: ActionContext, user: User) {
   const movieFiles = isTv(ctx.request)
     ? []
     : await call('radarr', () =>
@@ -654,20 +793,9 @@ async function remove(base: ActionContext, user: User) {
     }
   }
 
-  const key = itemKey(ctx);
-  await setControl(key, 'deleted', user.id);
-  const original = new Set(base.episodes.map(episodeKey));
-  for (const episode of ctx.episodes) {
-    if (original.has(episodeKey(episode))) continue;
-    await setControl(
-      {
-        requestId: ctx.request.id,
-        seasonNumber: episode.seasonNumber,
-        episodeNumber: episode.episodeNumber,
-      },
-      'deleted',
-      user.id
-    );
+  await setControl(itemKey(ctx), 'deleted', user.id);
+  for (const key of extraKeys(ctx)) {
+    await setControl(key, 'deleted', user.id);
   }
 }
 
@@ -709,7 +837,10 @@ async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 async function currentState(request: MediaRequest): Promise<RequestLiveState> {
-  return deriveRequestState(await loadRequestInputs(request));
+  return (
+    liveStatusHub.cachedState(request.id) ??
+    deriveRequestState(await loadRequestInputs(request))
+  );
 }
 
 export async function runAction(req: ActionRequest): Promise<RequestLiveState> {
@@ -725,14 +856,15 @@ export async function runAction(req: ActionRequest): Promise<RequestLiveState> {
       return currentState(request);
     }
 
-    const ctx = await loadContext(request, scope);
-    const item = scopeItem(ctx.state, scope);
+    const loaded = await loadContext(request, scope);
+    const item = scopeItem(loaded.state, scope);
     if (!item || !item.actions.includes(action)) {
       throw new ActionError(
         400,
         `Cannot ${action} this item in its current state.`
       );
     }
+    const ctx = action === 'restore' ? loaded : expanded(loaded);
 
     logger.info('Running request control action', {
       label: 'Request Controls',

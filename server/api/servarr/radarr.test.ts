@@ -178,4 +178,20 @@ describe('RadarrAPI request controls', () => {
       },
     ]);
   });
+
+  it('getMovieHistory GETs /history/movie for the item', async () => {
+    const api = buildRadarr();
+    const records = [{ id: 1, downloadId: 'abc', eventType: 'grabbed' }];
+    const get = mock.method(getAxios(api), 'get', async () => ({
+      data: records,
+    }));
+
+    const result = await api.getMovieHistory(7);
+
+    assert.deepStrictEqual(get.mock.calls[0].arguments, [
+      '/history/movie',
+      { params: { movieId: 7 } },
+    ]);
+    assert.deepStrictEqual(result, records);
+  });
 });

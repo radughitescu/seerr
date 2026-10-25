@@ -26,27 +26,32 @@ export async function getControls(
   });
 }
 
-async function clearChildren(manager: EntityManager, key: ItemKey) {
+async function clearChildren(
+  manager: EntityManager,
+  key: ItemKey,
+  keepDeleted = false
+) {
+  if (key.seasonNumber !== null && key.episodeNumber !== null) {
+    return;
+  }
+  const query = manager
+    .createQueryBuilder()
+    .delete()
+    .from(RequestItemControl)
+    .where('requestId = :requestId', { requestId: key.requestId });
   if (key.seasonNumber === null) {
-    await manager
-      .createQueryBuilder()
-      .delete()
-      .from(RequestItemControl)
-      .where('requestId = :requestId', { requestId: key.requestId })
-      .andWhere('(seasonNumber IS NOT NULL OR episodeNumber IS NOT NULL)')
-      .execute();
-  } else if (key.episodeNumber === null) {
-    await manager
-      .createQueryBuilder()
-      .delete()
-      .from(RequestItemControl)
-      .where('requestId = :requestId', { requestId: key.requestId })
+    query.andWhere('(seasonNumber IS NOT NULL OR episodeNumber IS NOT NULL)');
+  } else {
+    query
       .andWhere('seasonNumber = :seasonNumber', {
         seasonNumber: key.seasonNumber,
       })
-      .andWhere('episodeNumber IS NOT NULL')
-      .execute();
+      .andWhere('episodeNumber IS NOT NULL');
   }
+  if (keepDeleted) {
+    query.andWhere('state != :kept', { kept: 'deleted' });
+  }
+  await query.execute();
 }
 
 export async function setControl(
@@ -57,7 +62,7 @@ export async function setControl(
 ): Promise<RequestItemControl> {
   return dataSource.transaction(async (manager) => {
     const repo = manager.getRepository(RequestItemControl);
-    await clearChildren(manager, key);
+    await clearChildren(manager, key, state !== 'deleted');
 
     const existing = await repo.findOne({
       where: {
@@ -81,8 +86,12 @@ export async function setControl(
   });
 }
 
-async function clearIn(manager: EntityManager, key: ItemKey) {
-  await clearChildren(manager, key);
+async function clearIn(
+  manager: EntityManager,
+  key: ItemKey,
+  keepDeleted = false
+) {
+  await clearChildren(manager, key, keepDeleted);
   await manager.getRepository(RequestItemControl).delete({
     request: { id: key.requestId },
     seasonNumber: matchOrNull(key.seasonNumber),
@@ -101,7 +110,8 @@ export type ControlLayout = {
 
 export async function releaseControl(
   key: ItemKey,
-  layout: ControlLayout
+  layout: ControlLayout,
+  options: { keepDeleted?: boolean } = {}
 ): Promise<void> {
   await dataSource.transaction(async (manager) => {
     const repo = manager.getRepository(RequestItemControl);
@@ -155,7 +165,7 @@ export async function releaseControl(
         );
       }
     }
-    await clearIn(manager, key);
+    await clearIn(manager, key, options.keepDeleted ?? false);
   });
 }
 

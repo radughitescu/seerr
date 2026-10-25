@@ -151,6 +151,10 @@ export class LiveStatusHub {
     );
   }
 
+  public cachedState(requestId: number): RequestLiveState | undefined {
+    return this.states.get(requestId);
+  }
+
   public clientCount(): number {
     return this.subscriptions.size;
   }

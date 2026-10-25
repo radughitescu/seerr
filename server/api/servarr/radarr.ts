@@ -1,5 +1,6 @@
 import logger from '@server/logger';
 import type { AxiosResponse } from 'axios';
+import type { HistoryRecord } from './base';
 import ServarrBase from './base';
 
 export interface RadarrMovieOptions {
@@ -326,6 +327,22 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
         movieId,
       });
       throw new Error('Failed to get movie files', { cause: e });
+    }
+  }
+
+  public async getMovieHistory(movieId: number): Promise<HistoryRecord[]> {
+    try {
+      const response = await this.axios.get<HistoryRecord[]>('/history/movie', {
+        params: { movieId },
+      });
+      return response.data;
+    } catch (e) {
+      logger.error('Failed to retrieve movie history', {
+        label: 'Radarr API',
+        errorMessage: e.message,
+        movieId,
+      });
+      throw new Error('Failed to get movie history', { cause: e });
     }
   }
 

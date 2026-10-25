@@ -55,7 +55,7 @@ const key = (
 ) => ({ requestId, seasonNumber, episodeNumber });
 
 describe('request controls store', () => {
-  it('setControl on a season removes episode rows of that season', async () => {
+  it('setControl paused on a season removes paused episode rows and keeps deleted ones', async () => {
     const { request, user } = await seedRequest();
     await setControl(key(request.id, 1, 3), 'paused', user.id);
     await setControl(key(request.id, 1, 4), 'deleted', user.id);
@@ -63,13 +63,56 @@ describe('request controls store', () => {
     await setControl(key(request.id, 1, null), 'paused', user.id);
     const rows = await getControls(request.id);
     assert.deepEqual(
-      rows
-        .map((r) => [r.seasonNumber, r.episodeNumber])
-        .sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
+      rows.map((r) => [r.seasonNumber, r.episodeNumber, r.state]),
       [
-        [1, null],
-        [2, 1],
+        [1, 4, 'deleted'],
+        [2, 1, 'paused'],
+        [1, null, 'paused'],
       ]
+    );
+  });
+
+  it('setControl deleted on a season removes every episode row of that season', async () => {
+    const { request, user } = await seedRequest();
+    await setControl(key(request.id, 1, 3), 'paused', user.id);
+    await setControl(key(request.id, 1, 4), 'deleted', user.id);
+    await setControl(key(request.id, 1, null), 'deleted', user.id);
+    const rows = await getControls(request.id);
+    assert.deepEqual(
+      rows.map((r) => [r.seasonNumber, r.episodeNumber, r.state]),
+      [[1, null, 'deleted']]
+    );
+  });
+
+  it('setControl paused on the request keeps a deleted season', async () => {
+    const { request, user } = await seedRequest();
+    await setControl(key(request.id, 2, null), 'deleted', user.id);
+    await setControl(key(request.id, 1, null), 'paused', user.id);
+    await setControl(key(request.id, null, null), 'paused', user.id);
+    const rows = await getControls(request.id);
+    assert.deepEqual(
+      rows.map((r) => [r.seasonNumber, r.episodeNumber, r.state]),
+      [
+        [2, null, 'deleted'],
+        [null, null, 'paused'],
+      ]
+    );
+  });
+
+  it('releaseControl keeping deleted rows clears only paused rows in scope', async () => {
+    const { request, user } = await seedRequest();
+    await setControl(key(request.id, 1, null), 'paused', user.id);
+    await setControl(key(request.id, 1, 2), 'paused', user.id);
+    await setControl(key(request.id, 1, 3), 'deleted', user.id);
+    await releaseControl(
+      key(request.id, 1, null),
+      [{ seasonNumber: 1, episodeNumbers: [1, 2, 3] }],
+      { keepDeleted: true }
+    );
+    const rows = await getControls(request.id);
+    assert.deepEqual(
+      rows.map((r) => [r.seasonNumber, r.episodeNumber, r.state]),
+      [[1, 3, 'deleted']]
     );
   });
 

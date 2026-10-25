@@ -146,6 +146,17 @@ describe('LiveStatusHub', () => {
     );
   });
 
+  it('cachedState returns the loaded state and forgets it after the last unsubscribe', async () => {
+    mock.method(sources, 'loadRequestInputs', (async (r: MediaRequest) =>
+      inputs(r.id)) as typeof sources.loadRequestInputs);
+    assert.equal(hub.cachedState(1), undefined);
+    const unsubscribe = hub.subscribe([1], () => undefined);
+    await flush();
+    assert.equal(hub.cachedState(1)?.requestId, 1);
+    unsubscribe();
+    assert.equal(hub.cachedState(1), undefined);
+  });
+
   it('second subscriber to a loaded id gets cached snapshot synchronously', async () => {
     const load = mock.method(
       sources,

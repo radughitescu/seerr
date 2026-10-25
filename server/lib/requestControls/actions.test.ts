@@ -13,8 +13,12 @@ import Media from '@server/entity/Media';
 import { MediaRequest } from '@server/entity/MediaRequest';
 import SeasonRequest from '@server/entity/SeasonRequest';
 import { User } from '@server/entity/User';
+import { liveStatusHub } from '@server/lib/liveStatus/hub';
 import { clients } from '@server/lib/liveStatus/sources';
-import type { ItemAction } from '@server/lib/liveStatus/types';
+import type {
+  ItemAction,
+  RequestLiveState,
+} from '@server/lib/liveStatus/types';
 import type {
   RadarrSettings,
   SonarrSettings,
@@ -67,7 +71,21 @@ type World = {
   torrents?: TorrentInfo[];
   movie?: { hasFile: boolean; monitored?: boolean };
   movieFiles?: { id: number; path: string; size: number }[];
+  history?: History[];
 };
+
+type History = {
+  episodeId?: number;
+  movieId?: number;
+  downloadId: string;
+  eventType: string;
+};
+
+const grabbed = (downloadId: string, ...episodeIds: number[]): History[] =>
+  episodeIds.flatMap((episodeId) => [
+    { episodeId, downloadId, eventType: 'grabbed' },
+    { episodeId, downloadId, eventType: 'downloadFolderImported' },
+  ]);
 
 const ep = (episodeNumber: number, over: Partial<Episode> = {}): Episode => ({
   id: 100 + episodeNumber,
@@ -156,6 +174,7 @@ function install(world: World) {
         title: `E${e.episodeNumber}`,
         monitored: e.monitored ?? true,
         episodeFileId: e.episodeFileId ?? 0,
+        lastSearchTime: '2026-10-01T00:00:00Z',
         ...e,
       }))
     ),
@@ -168,7 +187,10 @@ function install(world: World) {
       }))
     ),
     getQueueFor: mock.fn(async () =>
-      (world.queue ?? []).filter((r) => r.episodeId !== undefined)
+      (world.queue ?? []).filter((r) => r.movieId === undefined)
+    ),
+    getSeriesHistory: mock.fn(async () =>
+      (world.history ?? []).filter((h) => h.movieId === undefined)
     ),
     getCommands: mock.fn(async () => []),
     setEpisodesMonitored: mock.fn(write('setEpisodesMonitored')),
@@ -193,6 +215,9 @@ function install(world: World) {
     ),
     getQueueFor: mock.fn(async () =>
       (world.queue ?? []).filter((r) => r.movieId !== undefined)
+    ),
+    getMovieHistory: mock.fn(async () =>
+      (world.history ?? []).filter((h) => h.movieId !== undefined)
     ),
     getCommands: mock.fn(async () => []),
     setMovieMonitored: mock.fn(write('setMovieMonitored')),
@@ -454,6 +479,32 @@ describe('request control actions', () => {
 
     it('pause on an already paused item makes no external calls', async () => {
       const ctx = await seed(MediaType.TV);
+      const { log, sonarr, transmission } = install({
+        episodes: [ep(1)],
+        queue: [q(1, SINGLE, 101)],
+        torrents: [torrent(SINGLE, [['Show.S01E01.mkv', 100, 50]])],
+      });
+      const cached = {
+        requestId: ctx.request.id,
+        available: true,
+      } as RequestLiveState;
+      mock.method(liveStatusHub, 'cachedState', (id: number) =>
+        id === ctx.request.id ? cached : undefined
+      );
+      await setControl(key(ctx.request.id, 1, null), 'paused', ctx.user.id);
+      const state = await act(ctx, 'pause', 1, 1);
+      assert.equal(state, cached);
+      assert.deepEqual(log, []);
+      assert.equal(sonarr.getEpisodes.mock.callCount(), 0);
+      assert.equal(sonarr.getEpisodeFiles.mock.callCount(), 0);
+      assert.equal(sonarr.getQueueFor.mock.callCount(), 0);
+      assert.equal(sonarr.getSeriesHistory.mock.callCount(), 0);
+      assert.equal(transmission.getTorrents.mock.callCount(), 0);
+      assert.deepEqual(await rows(ctx.request.id), [[1, null, 'paused']]);
+    });
+
+    it('pause on an already paused item without a cached state only reads', async () => {
+      const ctx = await seed(MediaType.TV);
       const { log } = install({
         episodes: [ep(1)],
         queue: [q(1, SINGLE, 101)],
@@ -463,7 +514,6 @@ describe('request control actions', () => {
       const state = await act(ctx, 'pause', 1, 1);
       assert.deepEqual(log, []);
       assert.equal(state.seasons[0].episodes[0].status, 'paused');
-      assert.deepEqual(await rows(ctx.request.id), [[1, null, 'paused']]);
     });
 
     it('transmission failure during pause throws ServiceError and leaves no control row', async () => {
@@ -650,7 +700,7 @@ describe('request control actions', () => {
       const ctx = await seed(MediaType.TV);
       const { log, transmission } = install({
         episodes: [ep(1), ep(2)],
-        queue: [q(1, SINGLE, 101)],
+        queue: [q(1, SINGLE, 101), q(2, SINGLE, 102)],
         torrents: [
           torrent(SINGLE, [
             ['Show/Show.S01E01.mkv', 1000, 500],
@@ -664,6 +714,25 @@ describe('request control actions', () => {
         ['setFilesWanted', SINGLE, [0], false],
       ]);
       assert.equal(transmission.remove.mock.callCount(), 0);
+    });
+
+    it('episode delete of a torrent tied only to that episode removes it despite unmappable names', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [ep(1), ep(2)],
+        queue: [q(1, SINGLE, 101)],
+        torrents: [
+          torrent(SINGLE, [
+            ['Show/Show.S01E01.mkv', 1000, 500],
+            ['Show/Show.Part.Two.mkv', 1000, 500],
+          ]),
+        ],
+      });
+      await act(ctx, 'delete', 1, 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101], false],
+        ['sonarr.removeQueueItems', [1], true],
+      ]);
     });
 
     it('delete of S01E01 whose file is S01E01E02 deletes the file and reports both episodes in preview', async () => {
@@ -788,6 +857,339 @@ describe('request control actions', () => {
         ['searchMovie', 9],
       ]);
       assert.deepEqual(await rows(ctx.request.id), []);
+    });
+  });
+
+  describe('torrents found through history', () => {
+    it('delete of an imported season removes the seeding torrent found via history', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [
+          ep(1, { hasFile: true, episodeFileId: 501 }),
+          ep(2, { hasFile: true, episodeFileId: 502 }),
+          ep(3, { hasFile: true, episodeFileId: 503 }),
+        ],
+        episodeFiles: [
+          { id: 501, path: '/tv/Show/S01E01.mkv', size: 1000 },
+          { id: 502, path: '/tv/Show/S01E02.mkv', size: 1000 },
+          { id: 503, path: '/tv/Show/S01E03.mkv', size: 1000 },
+        ],
+        history: grabbed(PACK.toUpperCase(), 101, 102, 103),
+        torrents: [pack({ status: 6 })],
+      });
+      await act(ctx, 'delete', 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102, 103], false],
+        ['remove', [PACK], true],
+        ['deleteEpisodeFiles', [501, 502, 503]],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[1, null, 'deleted']]);
+    });
+
+    it('preview of an imported pack episode still seeding reports bytesFreed 0 and torrentKept true without a queue record', async () => {
+      const ctx = await seed(MediaType.TV);
+      install({
+        episodes: [
+          ep(1, { hasFile: true, episodeFileId: 501 }),
+          ep(2, { hasFile: true, episodeFileId: 502 }),
+          ep(3, { hasFile: true, episodeFileId: 503 }),
+        ],
+        episodeFiles: [
+          { id: 501, path: '/tv/Show/S01E01.mkv', size: 1000 },
+          { id: 502, path: '/tv/Show/S01E02.mkv', size: 1000 },
+          { id: 503, path: '/tv/Show/S01E03.mkv', size: 1000 },
+        ],
+        history: grabbed(PACK, 101, 102, 103),
+        torrents: [pack({ status: 6 })],
+      });
+      const preview = await getDeletePreview(ctx.request, 1, 2);
+      assert.deepEqual(preview, {
+        files: [
+          { path: '/tv/Show/S01E02.mkv', bytes: 1000, episodes: ['S01E02'] },
+        ],
+        bytesFreed: 0,
+        torrentKept: true,
+      });
+    });
+
+    it('movie delete removes the seeding movie torrent found via history', async () => {
+      const ctx = await seed(MediaType.MOVIE);
+      const { log } = install({
+        movie: { hasFile: true },
+        movieFiles: [{ id: 900, path: '/movies/Movie.2020.mkv', size: 1000 }],
+        history: [
+          { movieId: 9, downloadId: SINGLE, eventType: 'grabbed' },
+          { movieId: 9, downloadId: PACK, eventType: 'downloadFailed' },
+        ],
+        torrents: [
+          torrent(SINGLE, [['Movie.2020.mkv', 1000, 1000]], { status: 6 }),
+          torrent(PACK, [['Other.mkv', 1000, 1000]], { status: 6 }),
+        ],
+      });
+      const preview = await getDeletePreview(ctx.request, null, null);
+      assert.equal(preview.bytesFreed, 1000);
+      await act(ctx, 'delete');
+      assert.deepEqual(log, [
+        ['setMovieMonitored', 9, false],
+        ['remove', [SINGLE], true],
+        ['deleteMovieFile', 900],
+      ]);
+    });
+
+    const unnamedPack = () =>
+      torrent(PACK, [
+        ['Show.Complete/01.mkv', 1000, 1000],
+        ['Show.Complete/02.mkv', 1000, 1000],
+        ['Show.Complete/info.nfo', 1, 1],
+      ]);
+
+    it('season delete removes a pack with unmappable names when history ties it only to that season', async () => {
+      const ctx = await seed(MediaType.TV, [1, 2]);
+      const { log } = install({
+        episodes: [
+          ep(1, { hasFile: true, episodeFileId: 501 }),
+          ep(2, { hasFile: true, episodeFileId: 502 }),
+          ep(1, { id: 201, seasonNumber: 2 }),
+        ],
+        history: grabbed(PACK, 101, 102),
+        torrents: [unnamedPack()],
+      });
+      await act(ctx, 'delete', 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102], false],
+        ['remove', [PACK], true],
+        ['deleteEpisodeFiles', [501, 502]],
+      ]);
+    });
+
+    it('season delete keeps a pack with unmappable names and no history', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [
+          ep(1, { hasFile: true, episodeFileId: 501 }),
+          ep(2, { hasFile: true, episodeFileId: 502 }),
+        ],
+        queue: [{ ...q(11, PACK, 101), episodeId: undefined }],
+        torrents: [unnamedPack()],
+      });
+      await act(ctx, 'delete', 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102], false],
+        ['deleteEpisodeFiles', [501, 502]],
+      ]);
+    });
+
+    it('season delete keeps a pack whose history includes another season', async () => {
+      const ctx = await seed(MediaType.TV, [1, 2]);
+      const { log } = install({
+        episodes: [
+          ep(1, { hasFile: true, episodeFileId: 501 }),
+          ep(2, { hasFile: true, episodeFileId: 502 }),
+          ep(1, {
+            id: 201,
+            seasonNumber: 2,
+            hasFile: true,
+            episodeFileId: 601,
+          }),
+        ],
+        history: grabbed(PACK, 101, 102, 201),
+        torrents: [unnamedPack()],
+      });
+      await act(ctx, 'delete', 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102], false],
+        ['deleteEpisodeFiles', [501, 502]],
+      ]);
+    });
+  });
+
+  describe('restore with a kept torrent Sonarr no longer tracks', () => {
+    it('re-wants the file and still searches', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [
+          ep(1, { hasFile: true, episodeFileId: 501 }),
+          ep(2, { monitored: false }),
+          ep(3, { hasFile: true, episodeFileId: 503 }),
+        ],
+        history: grabbed(PACK, 101, 102, 103),
+        torrents: [
+          torrent(
+            PACK,
+            [
+              ['Show.S01/Show.S01E01.mkv', 1000, 1000],
+              ['Show.S01/Show.S01E02.mkv', 1000, 1000, false],
+              ['Show.S01/Show.S01E03.mkv', 1000, 1000],
+            ],
+            { status: 6 }
+          ),
+        ],
+      });
+      await setControl(key(ctx.request.id, 1, 2), 'deleted', ctx.user.id);
+      await act(ctx, 'restore', 1, 2);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [102], true],
+        ['setFilesWanted', PACK, [1], true],
+        ['searchEpisodes', [102]],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), []);
+    });
+  });
+
+  describe('deleted children under a paused parent', () => {
+    it('Pause S1 then Delete E3 then Resume S1 keeps E3 deleted, unmonitored, files unwanted and unsearched', async () => {
+      const ctx = await seed(MediaType.TV);
+      const world: World = {
+        episodes: [ep(1), ep(2), ep(3)],
+        queue: packQueue(),
+        torrents: [pack()],
+      };
+      const { log } = install(world);
+
+      await act(ctx, 'pause', 1);
+      assert.deepEqual(log.splice(0), [
+        ['setEpisodesMonitored', [101, 102, 103], false],
+        ['stop', [PACK]],
+      ]);
+      world.episodes = world.episodes?.map((e) => ({ ...e, monitored: false }));
+      world.torrents = [pack({ status: 0 })];
+
+      await act(ctx, 'delete', 1, 3);
+      assert.deepEqual(log.splice(0), [
+        ['setEpisodesMonitored', [103], false],
+        ['setFilesWanted', PACK, [2], false],
+      ]);
+      world.torrents = [
+        torrent(
+          PACK,
+          [
+            ['Show.S01/Show.S01E01.mkv', 1000, 1000],
+            ['Show.S01/Show.S01E02.mkv', 1000, 1000],
+            ['Show.S01/Show.S01E03.mkv', 1000, 400, false],
+          ],
+          { status: 0 }
+        ),
+      ];
+
+      await act(ctx, 'resume', 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102], true],
+        ['start', [PACK]],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[1, 3, 'deleted']]);
+    });
+
+    it('Delete E3 then Pause S1 keeps the E3 deleted row', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({ episodes: [ep(1), ep(2), ep(3)] });
+      await act(ctx, 'delete', 1, 3);
+      log.splice(0);
+      await act(ctx, 'pause', 1);
+      assert.deepEqual(log, [['setEpisodesMonitored', [101, 102], false]]);
+      assert.deepEqual(await rows(ctx.request.id), [
+        [1, 3, 'deleted'],
+        [1, null, 'paused'],
+      ]);
+    });
+
+    it('request pause over a deleted season keeps the season deleted, and resume leaves it alone', async () => {
+      const ctx = await seed(MediaType.TV, [1, 2]);
+      const { log } = install({
+        episodes: [
+          ep(1),
+          ep(2),
+          ep(1, { id: 201, seasonNumber: 2 }),
+          ep(2, { id: 202, seasonNumber: 2 }),
+        ],
+      });
+      await act(ctx, 'delete', 2);
+      log.splice(0);
+      await act(ctx, 'pause');
+      assert.deepEqual(log.splice(0), [
+        ['setEpisodesMonitored', [101, 102], false],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [
+        [2, null, 'deleted'],
+        [null, null, 'paused'],
+      ]);
+      await act(ctx, 'resume');
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102], true],
+        ['searchSeason', 42, 1],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[2, null, 'deleted']]);
+    });
+  });
+
+  describe('source failures and multi-episode files', () => {
+    it('prioritize with transmission down and no torrent hashes searches and returns 200', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log, transmission } = install({
+        episodes: [ep(1), ep(2)],
+        queue: [q(1, SINGLE, 102)],
+      });
+      transmission.getTorrents.mock.mockImplementation(async () => {
+        throw new Error('connect ECONNREFUSED');
+      });
+      const state = await act(ctx, 'prioritize', 1, 1);
+      assert.deepEqual(log, [['searchEpisodes', [101]]]);
+      assert.equal(state.available, false);
+    });
+
+    it('an action on an item with torrents fails when transmission is down', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log, transmission } = install({
+        episodes: [ep(1)],
+        queue: [q(1, SINGLE, 101)],
+      });
+      transmission.getTorrents.mock.mockImplementation(async () => {
+        throw new Error('connect ECONNREFUSED');
+      });
+      await assert.rejects(
+        act(ctx, 'pause', 1, 1),
+        (e: unknown) =>
+          e instanceof ServiceError && e.service === 'transmission'
+      );
+      assert.deepEqual(log, []);
+      assert.deepEqual(await rows(ctx.request.id), []);
+    });
+
+    it('pausing S01E01 of a S01E01E02 file pauses both episodes', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [ep(1), ep(2), ep(3)],
+        queue: [q(1, SINGLE, 101), q(2, SINGLE, 102)],
+        torrents: [torrent(SINGLE, [['Show.S01E01E02.mkv', 2000, 500]])],
+      });
+      await act(ctx, 'pause', 1, 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102], false],
+        ['stop', [SINGLE]],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [
+        [1, 1, 'paused'],
+        [1, 2, 'paused'],
+      ]);
+    });
+
+    it('prioritizing S01E01 of a S01E01E02 file inside a pack raises the shared file', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [ep(1), ep(2), ep(3)],
+        queue: packQueue(),
+        torrents: [
+          torrent(PACK, [
+            ['Show.S01/Show.S01E01E02.mkv', 2000, 500],
+            ['Show.S01/Show.S01E03.mkv', 1000, 500],
+          ]),
+        ],
+      });
+      await act(ctx, 'prioritize', 1, 1);
+      assert.deepEqual(log, [
+        ['queueMoveTop', [PACK]],
+        ['setBandwidthPriorityHigh', [PACK]],
+        ['setFilePriorityHigh', PACK, [0]],
+      ]);
     });
   });
 });

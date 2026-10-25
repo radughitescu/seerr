@@ -601,7 +601,9 @@ async function search(ctx: ActionContext, targets: Episode[]): Promise<void> {
   if (!isTv(ctx.request)) {
     if (movieNeedsSearch(ctx)) {
       const movieId = ctx.target.externalId;
-      await call('radarr', () => radarrFor(ctx.target).searchMovie(movieId));
+      await call('radarr', () =>
+        radarrFor(ctx.target).searchMovieStrict(movieId)
+      );
     }
     return;
   }

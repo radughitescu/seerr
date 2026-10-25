@@ -179,6 +179,27 @@ describe('RadarrAPI request controls', () => {
     ]);
   });
 
+  it('searchMovieStrict POSTs a MoviesSearch command', async () => {
+    const radarr = buildRadarr();
+    const post = mock.method(getAxios(radarr), 'post', async () => ({}));
+
+    await radarr.searchMovieStrict(7);
+
+    assert.deepStrictEqual(post.mock.calls[0].arguments, [
+      '/command',
+      { name: 'MoviesSearch', movieIds: [7] },
+    ]);
+  });
+
+  it('searchMovieStrict rejects when the command fails', async () => {
+    const radarr = buildRadarr();
+    mock.method(getAxios(radarr), 'post', async () => {
+      throw new Error('timeout');
+    });
+
+    await assert.rejects(() => radarr.searchMovieStrict(7), /timeout/);
+  });
+
   it('getMovieHistory GETs /history/movie for the item', async () => {
     const api = buildRadarr();
     const records = [{ id: 1, downloadId: 'abc', eventType: 'grabbed' }];

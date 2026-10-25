@@ -296,6 +296,11 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
       );
     }
   }
+
+  public async searchMovieStrict(movieId: number): Promise<void> {
+    await this.runCommand('MoviesSearch', { movieIds: [movieId] });
+  }
+
   public async setMovieMonitored(
     movieId: number,
     monitored: boolean

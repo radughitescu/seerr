@@ -172,6 +172,37 @@ describe('SonarrAPI request controls', () => {
     });
   });
 
+  it('setSeasonMonitored skips PUT when season absent or unchanged', async () => {
+    const sonarr = buildSonarr();
+    mock.method(getAxios(sonarr), 'get', async () => ({
+      data: {
+        id: 5,
+        seasons: [
+          { seasonNumber: 1, monitored: false },
+          { seasonNumber: 2, monitored: true },
+        ],
+      },
+    }));
+    const put = mock.method(getAxios(sonarr), 'put', async () => ({}));
+
+    await sonarr.setSeasonMonitored(5, 3, false);
+    await sonarr.setSeasonMonitored(5, 1, false);
+    await sonarr.setSeasonMonitored(5, 2, true);
+
+    assert.strictEqual(put.mock.callCount(), 0);
+  });
+
+  it('setEpisodesMonitored reports a failure as failing to set episodes monitored', async () => {
+    const sonarr = buildSonarr();
+    mock.method(getAxios(sonarr), 'put', async () => {
+      throw new Error('timeout');
+    });
+
+    await assert.rejects(() => sonarr.setEpisodesMonitored([1], false), {
+      message: 'Failed to set episodes monitored',
+    });
+  });
+
   it('searchEpisodes POSTs an EpisodeSearch command', async () => {
     const sonarr = buildSonarr();
     const post = mock.method(getAxios(sonarr), 'post', async () => ({}));

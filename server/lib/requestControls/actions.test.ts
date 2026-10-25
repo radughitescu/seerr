@@ -222,6 +222,7 @@ function install(world: World) {
     getCommands: mock.fn(async () => []),
     setMovieMonitored: mock.fn(write('setMovieMonitored')),
     searchMovie: mock.fn(write('searchMovie')),
+    searchMovieStrict: mock.fn(write('searchMovieStrict')),
     deleteMovieFile: mock.fn(write('deleteMovieFile')),
     removeQueueItems: mock.fn(write('radarr.removeQueueItems')),
   };
@@ -373,7 +374,7 @@ describe('request control actions', () => {
       const ctx = await seed(MediaType.MOVIE);
       const { log } = install({ movie: { hasFile: false } });
       await act(ctx, 'prioritize');
-      assert.deepEqual(log, [['searchMovie', 9]]);
+      assert.deepEqual(log, [['searchMovieStrict', 9]]);
     });
 
     it('moves a grabbed torrent to the top with high bandwidth priority', async () => {
@@ -936,9 +937,25 @@ describe('request control actions', () => {
       await act(ctx, 'restore');
       assert.deepEqual(log, [
         ['setMovieMonitored', 9, true],
-        ['searchMovie', 9],
+        ['searchMovieStrict', 9],
       ]);
       assert.deepEqual(await rows(ctx.request.id), []);
+    });
+
+    it('movie restore returns 502 when the radarr search fails', async () => {
+      const ctx = await seed(MediaType.MOVIE);
+      const { radarr, write } = install({
+        movie: { hasFile: false, monitored: false },
+      });
+      radarr.searchMovieStrict.mock.mockImplementation(
+        write('searchMovieStrict', () => new Error('Radarr search failed'))
+      );
+      await setControl(key(ctx.request.id, null, null), 'deleted', ctx.user.id);
+      await assert.rejects(
+        act(ctx, 'restore'),
+        (e: unknown) => e instanceof ServiceError && e.service === 'radarr'
+      );
+      assert.deepEqual(await rows(ctx.request.id), [[null, null, 'deleted']]);
     });
   });
 

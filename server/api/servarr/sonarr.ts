@@ -420,7 +420,7 @@ class SonarrAPI extends ServarrBase<{
         episodeIds,
         monitored,
       });
-      throw new Error('Failed to monitor episodes', { cause: e });
+      throw new Error('Failed to set episodes monitored', { cause: e });
     }
   }
 
@@ -431,6 +431,12 @@ class SonarrAPI extends ServarrBase<{
   ): Promise<void> {
     try {
       const series = await this.getSeriesById(seriesId);
+      const current = series.seasons.find(
+        (season) => season.seasonNumber === seasonNumber
+      );
+      if (!current || current.monitored === monitored) {
+        return;
+      }
       series.seasons = series.seasons.map((season) =>
         season.seasonNumber === seasonNumber ? { ...season, monitored } : season
       );

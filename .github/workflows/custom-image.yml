@@ -10,6 +10,10 @@ permissions:
   packages: write
   contents: read
 
+concurrency:
+  group: custom-image
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test

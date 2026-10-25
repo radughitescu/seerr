@@ -113,6 +113,16 @@ export enum MetadataProviderType {
   TVDB = 'tvdb',
 }
 
+export interface TransmissionSettings {
+  enabled: boolean;
+  hostname: string;
+  port: number;
+  useSsl: boolean;
+  rpcPath: string;
+  username: string;
+  password: string;
+}
+
 export interface MetadataSettings {
   tv: MetadataProviderType;
   anime: MetadataProviderType;
@@ -385,6 +395,7 @@ export interface AllSettings {
   tautulli: TautulliSettings;
   radarr: RadarrSettings[];
   sonarr: SonarrSettings[];
+  transmission: TransmissionSettings;
   public: PublicSettings;
   notifications: NotificationSettings;
   jobs: Record<JobId, JobSettings>;
@@ -463,6 +474,15 @@ class Settings {
       },
       radarr: [],
       sonarr: [],
+      transmission: {
+        enabled: false,
+        hostname: 'localhost',
+        port: 9091,
+        useSsl: false,
+        rpcPath: '/transmission/rpc',
+        username: '',
+        password: '',
+      },
       public: {
         initialized: false,
       },
@@ -700,6 +720,14 @@ class Settings {
 
   set sonarr(data: SonarrSettings[]) {
     this.data.sonarr = data;
+  }
+
+  get transmission(): TransmissionSettings {
+    return this.data.transmission;
+  }
+
+  set transmission(data: TransmissionSettings) {
+    this.data.transmission = data;
   }
 
   get public(): PublicSettings {

@@ -618,6 +618,45 @@ components:
         - is4k
         - minimumAvailability
         - isDefault
+    TransmissionSettings:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          example: false
+        hostname:
+          type: string
+          example: localhost
+        port:
+          type: number
+          example: 9091
+        useSsl:
+          type: boolean
+          example: false
+        rpcPath:
+          type: string
+          example: /transmission/rpc
+        username:
+          type: string
+        password:
+          type: string
+      required:
+        - enabled
+        - hostname
+        - port
+        - useSsl
+        - rpcPath
+        - username
+        - password
+    TransmissionSettingsResponse:
+      allOf:
+        - $ref: '#/components/schemas/TransmissionSettings'
+        - type: object
+          properties:
+            hasPassword:
+              type: boolean
+          required:
+            - hasPassword
     SonarrSettings:
       type: object
       properties:
@@ -2929,6 +2968,60 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/ServiceProfile'
+  /settings/transmission:
+    get:
+      summary: Get Transmission settings
+      description: Returns the Transmission connection settings. The password is never returned.
+      tags:
+        - settings
+      responses:
+        '200':
+          description: 'Values were returned'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransmissionSettingsResponse'
+    post:
+      summary: Update Transmission settings
+      description: Saves the Transmission connection settings. An empty password keeps the stored one.
+      tags:
+        - settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransmissionSettings'
+      responses:
+        '200':
+          description: 'Settings saved'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransmissionSettingsResponse'
+  /settings/transmission/test:
+    post:
+      summary: Test Transmission configuration
+      description: Tests the Transmission connection. An empty password uses the stored one.
+      tags:
+        - settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransmissionSettings'
+      responses:
+        '200':
+          description: Successfully connected to Transmission
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    example: '4.0.5'
   /settings/sonarr:
     get:
       summary: Get Sonarr settings

@@ -9,6 +9,7 @@ import PageTitle from '@app/components/Common/PageTitle';
 import OverrideRuleModal from '@app/components/Settings/OverrideRule/OverrideRuleModal';
 import OverrideRuleTiles from '@app/components/Settings/OverrideRule/OverrideRuleTiles';
 import RadarrModal from '@app/components/Settings/RadarrModal';
+import SettingsTransmission from '@app/components/Settings/SettingsTransmission';
 import SonarrModal from '@app/components/Settings/SonarrModal';
 import globalMessages from '@app/i18n/globalMessages';
 import defineMessages from '@app/utils/defineMessages';
@@ -553,6 +554,7 @@ const SettingsServices = () => {
           sonarrServices={sonarrData}
         />
       )}
+      <SettingsTransmission />
     </>
   );
 };

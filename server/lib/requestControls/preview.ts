@@ -4,6 +4,7 @@ import { clients } from '@server/lib/liveStatus/sources';
 import { getSettings } from '@server/lib/settings';
 import {
   assertControllable,
+  assertSeparable,
   checkScopeShape,
   deleteContext,
   episodeKey,
@@ -56,6 +57,7 @@ export async function getDeletePreview(
   assertControllable(request);
   checkScopeShape(request, scope);
   const ctx = deleteContext(await loadContext(request, scope));
+  assertSeparable(ctx, 'delete');
   const isMovie = request.type === MediaType.MOVIE;
   const library = await libraryFiles(ctx);
   const preview: DeletePreview = {

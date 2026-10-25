@@ -254,17 +254,20 @@ export function planTorrents(
 
   for (const torrent of ctx.known) {
     const hash = torrent.hashString.toLowerCase();
-    const queueIds = unique(
-      recordsFor(ctx.inputs.queue, hash).map((r) => r.id)
-    );
+    const records = recordsFor(ctx.inputs.queue, hash);
+    const queueIds = unique(records.map((r) => r.id));
 
     if (ctx.inputs.type === 'movie') {
       const media = torrent.files.filter((f) => !isExtraFile(f.name));
-      const covered = media.length === 1;
+      const tracked = records.some(
+        (r) =>
+          ctx.inputs.movieId !== undefined && r.movieId === ctx.inputs.movieId
+      );
+      const covered = tracked || media.length === 1;
       plans.push({
         torrent,
         covered,
-        unmappedMedia: !covered,
+        unmappedMedia: media.length !== 1,
         fileIndexes: covered ? torrent.files.map((f) => f.index) : [],
         keyIndexes: new Map(),
         episodeIds: new Set(),
@@ -661,6 +664,32 @@ async function rewant(ctx: ActionContext, targets: Episode[]): Promise<void> {
   }
 }
 
+const INSEPARABLE_PACK =
+  'This episode is inside a season pack whose files cannot be told apart. Pause or delete the whole season instead.';
+
+export function assertSeparable(ctx: ActionContext, action: ItemAction): void {
+  if (!isTv(ctx.request) || ctx.scope.episodeNumber === null) return;
+  if (action !== 'pause' && action !== 'delete') return;
+  const pending =
+    action === 'pause'
+      ? notDeleted(ctx)
+      : ctx.episodes.filter((e) => !e.hasFile);
+  const inseparable = ctx.torrents.some(
+    (plan) =>
+      !plan.covered &&
+      plan.queueIds.length > 0 &&
+      pending.some(
+        (e) =>
+          e.id !== undefined &&
+          plan.episodeIds.has(e.id) &&
+          !plan.keyIndexes.has(episodeKey(e))
+      )
+  );
+  if (inseparable) {
+    throw new ActionError(409, INSEPARABLE_PACK);
+  }
+}
+
 const itemKey = (ctx: ActionContext): ItemKey => ({
   requestId: ctx.request.id,
   seasonNumber: ctx.scope.seasonNumber,
@@ -895,6 +924,7 @@ export async function runAction(req: ActionRequest): Promise<RequestLiveState> {
       );
     }
     const ctx = action === 'restore' ? loaded : expanded(loaded);
+    assertSeparable(ctx, action);
 
     logger.info('Running request control action', {
       label: 'Request Controls',

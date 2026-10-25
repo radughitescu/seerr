@@ -1421,6 +1421,74 @@ describe('request control actions', () => {
       ]);
     });
 
+    it('movie pause stops a queue-tracked torrent that also holds an extras file', async () => {
+      const ctx = await seed(MediaType.MOVIE);
+      const { log } = install({
+        movie: { hasFile: false },
+        queue: [q(7, SINGLE, 9)],
+        torrents: [
+          torrent(SINGLE, [
+            ['Movie.2020/Movie.2020.mkv', 1000, 250],
+            ['Movie.2020/Extras/Behind.The.Scenes.mkv', 200, 50],
+          ]),
+        ],
+      });
+      await act(ctx, 'pause');
+      assert.deepEqual(log, [
+        ['setMovieMonitored', 9, false],
+        ['stop', [SINGLE]],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[null, null, 'paused']]);
+    });
+
+    it('movie delete removes a queue-tracked torrent with extras', async () => {
+      const ctx = await seed(MediaType.MOVIE);
+      const { log } = install({
+        movie: { hasFile: false },
+        queue: [q(7, SINGLE, 9)],
+        torrents: [
+          torrent(SINGLE, [
+            ['Movie.2020/Movie.2020.mkv', 1000, 250],
+            ['Movie.2020/Extras/Behind.The.Scenes.mkv', 200, 50],
+          ]),
+        ],
+      });
+      const preview = await getDeletePreview(ctx.request, null, null);
+      assert.equal(preview.torrentKept, false);
+      assert.equal(preview.bytesFreed, 300);
+      await act(ctx, 'delete');
+      assert.deepEqual(log, [
+        ['setMovieMonitored', 9, false],
+        ['radarr.removeQueueItems', [7], true],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[null, null, 'deleted']]);
+    });
+
+    it('episode pause inside an unmappable tracked pack returns 409', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [ep(1), ep(2), ep(3)],
+        queue: packQueue(),
+        torrents: [
+          torrent(PACK, [
+            ['Show.Season.1/part1.mkv', 1000, 500],
+            ['Show.Season.1/part2.mkv', 1000, 500],
+            ['Show.Season.1/part3.mkv', 1000, 500],
+          ]),
+        ],
+      });
+      const packError = (e: unknown) =>
+        e instanceof ActionError &&
+        e.status === 409 &&
+        e.message ===
+          'This episode is inside a season pack whose files cannot be told apart. Pause or delete the whole season instead.';
+      await assert.rejects(act(ctx, 'pause', 1, 2), packError);
+      await assert.rejects(act(ctx, 'delete', 1, 2), packError);
+      await assert.rejects(getDeletePreview(ctx.request, 1, 2), packError);
+      assert.deepEqual(log, []);
+      assert.deepEqual(await rows(ctx.request.id), []);
+    });
+
     it('movie delete removes a single-movie torrent with sample and extras', async () => {
       const ctx = await seed(MediaType.MOVIE);
       const { log } = install({

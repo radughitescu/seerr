@@ -137,6 +137,50 @@ describe('deriveItemStatus', () => {
   it('status 4 -> downloading', () => {
     assert.equal(deriveItemStatus(item({ torrent: torrent() })), 'downloading');
   });
+  it('queue importBlocked/failedPending/failed -> failed with status messages', () => {
+    for (const st of ['importBlocked', 'failedPending', 'failed']) {
+      assert.equal(
+        deriveItemStatus(item({ queue: queue({ trackedDownloadState: st }) })),
+        'failed'
+      );
+    }
+    const state = deriveRequestState(
+      input({
+        episodes: [ep(1)],
+        queue: [
+          queue({
+            episodeId: 101,
+            trackedDownloadState: 'importBlocked',
+            statusMessages: [{ title: 't', messages: ['no space', 'locked'] }],
+          }),
+        ],
+        torrents: [torrent()],
+      })
+    );
+    assert.equal(state.seasons[0].episodes[0].error, 'no space; locked');
+  });
+  it('torrent status 5 or 6 without file -> importing', () => {
+    for (const status of [5, 6] as const) {
+      assert.equal(
+        deriveItemStatus(item({ torrent: torrent({ status }) })),
+        'importing'
+      );
+    }
+  });
+  it('torrent status 1 or 2 -> queued', () => {
+    for (const status of [1, 2] as const) {
+      assert.equal(
+        deriveItemStatus(item({ torrent: torrent({ status }) })),
+        'queued'
+      );
+    }
+  });
+  it('torrent status 0 with no control -> stalled', () => {
+    assert.equal(
+      deriveItemStatus(item({ torrent: torrent({ status: 0 }) })),
+      'stalled'
+    );
+  });
   it('searchRunning -> searching', () => {
     assert.equal(deriveItemStatus(item({ searchRunning: true })), 'searching');
   });
@@ -256,6 +300,60 @@ describe('deriveRequestState', () => {
       })
     );
     assert.equal(state.seasons[0].episodes[0].percent, 50);
+  });
+
+  it('series search for another series does not mark episodes searching', () => {
+    const state = deriveRequestState(
+      input({
+        seriesId: 5,
+        episodes: [ep(1)],
+        runningSearches: [{ seriesId: 6 }],
+      })
+    );
+    assert.equal(state.seasons[0].episodes[0].status, 'unknown');
+    const own = deriveRequestState(
+      input({
+        seriesId: 5,
+        episodes: [ep(1)],
+        runningSearches: [{ seriesId: 5 }],
+      })
+    );
+    assert.equal(own.seasons[0].episodes[0].status, 'searching');
+  });
+
+  it('sonarr series search does not mark a movie searching', () => {
+    const state = deriveRequestState(
+      input({
+        type: 'movie',
+        movieId: 3,
+        seriesId: 3,
+        movie: { monitored: true, hasFile: false },
+        requestedSeasons: [],
+        runningSearches: [{ seriesId: 3 }],
+      })
+    );
+    assert.equal(state.movie?.status, 'unknown');
+    const own = deriveRequestState(
+      input({
+        type: 'movie',
+        movieId: 3,
+        movie: { monitored: true, hasFile: false },
+        requestedSeasons: [],
+        runningSearches: [{ movieIds: [3] }],
+      })
+    );
+    assert.equal(own.movie?.status, 'searching');
+  });
+
+  it('episode paused via season row with no torrent shows the season row pausedAtPercent', () => {
+    const state = deriveRequestState(
+      input({
+        controls: [control('paused', 1, null, 64)],
+        episodes: [ep(1)],
+      })
+    );
+    assert.equal(state.seasons[0].episodes[0].status, 'paused');
+    assert.equal(state.seasons[0].episodes[0].percent, 64);
   });
 
   it('available is false when a source failed', () => {

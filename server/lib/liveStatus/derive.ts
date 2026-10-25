@@ -41,8 +41,9 @@ export type RequestInputs = {
     sizeOnDisk?: number;
     lastSearchTime?: string;
   }[];
+  seriesId?: number;
+  movieId?: number;
   movie?: {
-    id?: number;
     monitored: boolean;
     hasFile: boolean;
     sizeOnDisk?: number;
@@ -100,8 +101,18 @@ export function deriveItemStatus(input: ItemInputs): ItemStatus {
     ['importPending', 'importing'].includes(queue.trackedDownloadState)
   )
     return 'importing';
+  if (
+    queue &&
+    ['importBlocked', 'failedPending', 'failed'].includes(
+      queue.trackedDownloadState
+    )
+  )
+    return 'failed';
 
   if (torrent) {
+    if (torrent.status === 5 || torrent.status === 6) return 'importing';
+    if (torrent.status === 1 || torrent.status === 2) return 'queued';
+    if (torrent.status === 0) return 'stalled';
     if (torrent.status === 3) return 'queued';
     if (torrent.status === 4) {
       const { done, total } = selectedBytes(torrent, input.fileIndexes);
@@ -157,17 +168,24 @@ export function deriveRequestState(input: RequestInputs): RequestLiveState {
 
   const searchRunning = (
     episodeId: number | undefined,
-    seasonNumber: number | null,
-    movieId?: number
+    seasonNumber: number | null
   ) =>
-    input.runningSearches.some(
-      (s) =>
-        (episodeId !== undefined && s.episodeIds?.includes(episodeId)) ||
-        (movieId !== undefined && s.movieIds?.includes(movieId)) ||
-        (s.seriesId !== undefined &&
-          !s.episodeIds &&
-          (s.seasonNumber === undefined || s.seasonNumber === seasonNumber))
-    );
+    input.runningSearches.some((s) => {
+      if (seasonNumber === null) {
+        return (
+          input.movieId !== undefined && !!s.movieIds?.includes(input.movieId)
+        );
+      }
+      if (episodeId !== undefined && s.episodeIds?.includes(episodeId)) {
+        return true;
+      }
+      return (
+        input.seriesId !== undefined &&
+        s.seriesId === input.seriesId &&
+        !s.episodeIds &&
+        (s.seasonNumber === undefined || s.seasonNumber === seasonNumber)
+      );
+    });
 
   const build = (
     seasonNumber: number | null,
@@ -213,11 +231,7 @@ export function deriveRequestState(input: RequestInputs): RequestLiveState {
       queue: queueRecord,
       torrent,
       fileIndexes,
-      searchRunning: searchRunning(
-        seasonNumber !== null ? src.id : undefined,
-        seasonNumber,
-        seasonNumber === null ? src.id : undefined
-      ),
+      searchRunning: searchRunning(src.id, seasonNumber),
       lastSearchTime: src.lastSearchTime,
       monitored: src.monitored,
     });
@@ -254,20 +268,37 @@ export function deriveRequestState(input: RequestInputs): RequestLiveState {
       }
     }
     if (status === 'paused') {
-      const paused = input.controls.find(
-        (c) =>
-          c.state === 'paused' &&
-          c.seasonNumber === seasonNumber &&
-          c.episodeNumber === episodeNumber
-      );
-      if (paused?.pausedAtPercent != null) {
-        item.percent = paused.pausedAtPercent;
+      if (item.percent === undefined) {
+        const chain: [number | null, number | null][] = [
+          [seasonNumber, episodeNumber],
+          [seasonNumber, null],
+          [null, null],
+        ];
+        for (const [sn, en] of chain) {
+          const row = input.controls.find(
+            (c) =>
+              c.state === 'paused' &&
+              c.seasonNumber === sn &&
+              c.episodeNumber === en
+          );
+          if (row?.pausedAtPercent != null) {
+            item.percent = row.pausedAtPercent;
+            break;
+          }
+        }
       }
     }
-    if (queueRecord?.errorMessage && status === 'failed') {
-      item.error = queueRecord.errorMessage;
-    } else if (torrent && torrent.error > 0 && status === 'failed') {
-      item.error = torrent.errorString;
+    if (status === 'failed') {
+      const messages = queueRecord?.statusMessages
+        .flatMap((m) => m.messages)
+        .join('; ');
+      if (messages) {
+        item.error = messages;
+      } else if (queueRecord?.errorMessage) {
+        item.error = queueRecord.errorMessage;
+      } else if (torrent && torrent.error > 0) {
+        item.error = torrent.errorString;
+      }
     }
     return { item, hash, weight, done, shared };
   };
@@ -285,7 +316,12 @@ export function deriveRequestState(input: RequestInputs): RequestLiveState {
 
   if (input.type === 'movie') {
     const src = input.movie ?? { monitored: false, hasFile: false };
-    const b = build(null, null, src, queueFor(undefined, src.id) ?? undefined);
+    const b = build(
+      null,
+      null,
+      src,
+      queueFor(undefined, input.movieId) ?? undefined
+    );
     movie = b.item;
     builtAll.push(b);
   } else {

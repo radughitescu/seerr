@@ -34,4 +34,36 @@ describe('mapFilesToEpisodes', () => {
     ]);
     assert.equal(map.size, 0);
   });
+
+  it('maps by file basename when the directory carries SxxEyy', () => {
+    const map = mapFilesToEpisodes([
+      file(0, 'Show.S01E01-E08.Pack/Show.S01E05.mkv'),
+    ]);
+    assert.deepEqual([...map.keys()], ['1x5']);
+  });
+
+  it('skips Sample/ directory files', () => {
+    const map = mapFilesToEpisodes([
+      file(0, 'Show.S01E01/Sample/Show.S01E01.mkv'),
+      file(1, 'Show.S01E01/Show.S01E01.sample.mkv'),
+    ]);
+    assert.equal(map.size, 0);
+  });
+
+  it('maps S01E01-02 to both episodes', () => {
+    const map = mapFilesToEpisodes([file(0, 'Show.S01E01-02.mkv')]);
+    assert.deepEqual(map.get('1x1'), [0]);
+    assert.deepEqual(map.get('1x2'), [0]);
+  });
+
+  it('maps S01E01-E02 to both episodes', () => {
+    const map = mapFilesToEpisodes([file(0, 'Show.S01E01-E02.mkv')]);
+    assert.deepEqual(map.get('1x1'), [0]);
+    assert.deepEqual(map.get('1x2'), [0]);
+  });
+
+  it('does not read a resolution as an episode range', () => {
+    const map = mapFilesToEpisodes([file(0, 'Show.S01E01-720p.mkv')]);
+    assert.deepEqual([...map.keys()], ['1x1']);
+  });
 });

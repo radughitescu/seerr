@@ -53,6 +53,9 @@ export function diffSnapshots(
   }
   const out: { path: Path; value: unknown }[] = [];
   walk(prev, next, [], out);
+  if (out.every((d) => d.path.length === 1 && d.path[0] === 'updatedAt')) {
+    return [];
+  }
   return out.map((d) => ({ requestId: next.requestId, ...d }));
 }
 

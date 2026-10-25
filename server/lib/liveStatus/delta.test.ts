@@ -113,4 +113,34 @@ describe('delta', () => {
       );
     }
   });
+
+  it('only updatedAt changed yields no deltas', () => {
+    const next = base();
+    next.updatedAt = '2026-01-01T00:00:09Z';
+    assert.deepEqual(diffSnapshots(base(), next), []);
+  });
+
+  it('includes updatedAt when other fields change', () => {
+    const next = base();
+    next.updatedAt = '2026-01-01T00:00:09Z';
+    next.available = false;
+    const d = diffSnapshots(base(), next);
+    assert.equal(d.length, 2);
+  });
+
+  it('round-trips through JSON including a removed key', () => {
+    const a = base();
+    const b = base();
+    delete b.seasons[0].episodes[0].percent;
+    b.seasons[0].episodes[1].percent = 77;
+    b.seasons[0].release = { name: 'r', sizeBytes: 1, peers: 2, rateBytes: 3 };
+    b.updatedAt = '2026-01-01T00:00:05Z';
+    const deltas = JSON.parse(JSON.stringify(diffSnapshots(a, b)));
+    const out = deltas.reduce(applyDelta, a);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(out)),
+      JSON.parse(JSON.stringify(b))
+    );
+    assert.ok(!('percent' in out.seasons[0].episodes[0]));
+  });
 });

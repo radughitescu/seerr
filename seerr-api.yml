@@ -6751,6 +6751,148 @@ paths:
                     type: number
                   completed:
                     type: number
+  /request/live:
+    get:
+      summary: Stream live request status
+      description: |
+        Server-Sent Events stream with live download status for the given requests. Sends a `snapshot` event per request, then `delta` events with changes, and a `: ping` comment every 15 seconds. Requests the user cannot view are ignored.
+      tags:
+        - request
+      parameters:
+        - in: query
+          name: ids
+          required: true
+          description: Comma-separated request ids, at most 50
+          example: '1,2,3'
+          allowReserved: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: Invalid ids
+  /request/{requestId}/control:
+    post:
+      summary: Control a request item
+      description: |
+        Prioritizes, pauses, resumes, deletes or restores a whole request, one season or one episode. Allowed for the requester and users with `MANAGE_REQUESTS` or `REQUEST_VIEW`.
+      tags:
+        - request
+      parameters:
+        - in: path
+          name: requestId
+          description: Request ID
+          required: true
+          example: '1'
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [prioritize, pause, resume, delete, restore]
+                seasonNumber:
+                  type: integer
+                  minimum: 0
+                  nullable: true
+                episodeNumber:
+                  type: integer
+                  minimum: 0
+                  nullable: true
+              required:
+                - action
+      responses:
+        '200':
+          description: Live state of the request after the action
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Action not valid for the item in its current state
+        '403':
+          description: Not allowed to view this request
+        '404':
+          description: Request not found
+        '502':
+          description: Sonarr, Radarr or Transmission failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service:
+                    type: string
+                    enum: [sonarr, radarr, transmission]
+                  message:
+                    type: string
+  /request/{requestId}/control/delete-preview:
+    get:
+      summary: Preview a delete
+      description: Lists the files a delete of the request, season or episode removes and the space it frees.
+      tags:
+        - request
+      parameters:
+        - in: path
+          name: requestId
+          description: Request ID
+          required: true
+          example: '1'
+          schema:
+            type: string
+        - in: query
+          name: seasonNumber
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: episodeNumber
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Delete preview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path:
+                          type: string
+                        bytes:
+                          type: number
+                        episodes:
+                          type: array
+                          items:
+                            type: string
+                  bytesFreed:
+                    type: number
+                  torrentKept:
+                    type: boolean
+        '403':
+          description: Not allowed to view this request
+        '404':
+          description: Request not found
+        '502':
+          description: Sonarr, Radarr or Transmission failed
   /request/{requestId}:
     get:
       summary: Get MediaRequest

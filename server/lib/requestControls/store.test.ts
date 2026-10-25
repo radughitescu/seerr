@@ -14,6 +14,7 @@ import {
   effectiveState,
   getControls,
   isBlocked,
+  releaseControl,
   setControl,
 } from './store';
 
@@ -150,5 +151,58 @@ describe('request controls store', () => {
     await setControl(key(request.id, 1, null), 'paused', user.id);
     await getRepository(MediaRequest).delete(request.id);
     assert.equal(await getRepository(RequestItemControl).count(), 0);
+  });
+
+  it('releaseControl on an episode under a paused season keeps its siblings paused', async () => {
+    const { request, user } = await seedRequest();
+    await setControl(key(request.id, 1, null), 'paused', user.id, 40);
+    await setControl(key(request.id, 1, 3), 'deleted', user.id);
+    await releaseControl(key(request.id, 1, 2), [
+      { seasonNumber: 1, episodeNumbers: [1, 2, 3] },
+    ]);
+    const rows = await getControls(request.id);
+    assert.deepEqual(
+      rows
+        .map((r) => [
+          r.seasonNumber,
+          r.episodeNumber,
+          r.state,
+          r.pausedAtPercent,
+        ])
+        .sort((a, b) => Number(a[1]) - Number(b[1])),
+      [
+        [1, 1, 'paused', 40],
+        [1, 3, 'deleted', null],
+      ]
+    );
+    assert.equal(effectiveState(rows, 1, 2), null);
+  });
+
+  it('releaseControl on a season under a deleted request keeps other seasons deleted', async () => {
+    const { request, user } = await seedRequest();
+    await setControl(key(request.id, null, null), 'deleted', user.id);
+    await releaseControl(key(request.id, 2, null), [
+      { seasonNumber: 1, episodeNumbers: [1] },
+      { seasonNumber: 2, episodeNumbers: [1] },
+    ]);
+    const rows = await getControls(request.id);
+    assert.deepEqual(
+      rows.map((r) => [r.seasonNumber, r.episodeNumber, r.state]),
+      [[1, null, 'deleted']]
+    );
+  });
+
+  it('releaseControl on an episode under a paused request keeps everything else paused', async () => {
+    const { request, user } = await seedRequest();
+    await setControl(key(request.id, null, null), 'paused', user.id, 10);
+    await releaseControl(key(request.id, 1, 1), [
+      { seasonNumber: 1, episodeNumbers: [1, 2] },
+      { seasonNumber: 2, episodeNumbers: [1] },
+    ]);
+    const rows = await getControls(request.id);
+    assert.equal(effectiveState(rows, 1, 1), null);
+    assert.equal(effectiveState(rows, 1, 2), 'paused');
+    assert.equal(effectiveState(rows, 2, 1), 'paused');
+    assert.equal(effectiveState(rows, null, null), null);
   });
 });

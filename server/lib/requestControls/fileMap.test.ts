@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { mapFilesToEpisodes } from './fileMap';
+import { isExtraFile, mapFilesToEpisodes } from './fileMap';
 
 const file = (index: number, name: string) => ({
   index,
@@ -65,5 +65,30 @@ describe('mapFilesToEpisodes', () => {
   it('does not read a resolution as an episode range', () => {
     const map = mapFilesToEpisodes([file(0, 'Show.S01E01-720p.mkv')]);
     assert.deepEqual([...map.keys()], ['1x1']);
+  });
+});
+
+describe('isExtraFile', () => {
+  it('treats samples, subtitles and metadata as extras', () => {
+    for (const name of [
+      'Show/Sample/Show.S01E01.mkv',
+      'Show/Show.S01E01.sample.mkv',
+      'Show/Show.S01E01.nfo',
+      'Show/Subs/English.srt',
+      'Show/cover.jpg',
+    ]) {
+      assert.equal(isExtraFile(name), true, name);
+    }
+  });
+
+  it('treats video files and archives as media', () => {
+    for (const name of [
+      'Show/Show.Part.Two.mkv',
+      'Show/episode.mp4',
+      'Show/show.rar',
+      'Show/show.r00',
+    ]) {
+      assert.equal(isExtraFile(name), false, name);
+    }
   });
 });

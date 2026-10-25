@@ -81,14 +81,81 @@ export async function setControl(
   });
 }
 
+async function clearIn(manager: EntityManager, key: ItemKey) {
+  await clearChildren(manager, key);
+  await manager.getRepository(RequestItemControl).delete({
+    request: { id: key.requestId },
+    seasonNumber: matchOrNull(key.seasonNumber),
+    episodeNumber: matchOrNull(key.episodeNumber),
+  });
+}
+
 export async function clearControl(key: ItemKey): Promise<void> {
+  await dataSource.transaction((manager) => clearIn(manager, key));
+}
+
+export type ControlLayout = {
+  seasonNumber: number;
+  episodeNumbers: number[];
+}[];
+
+export async function releaseControl(
+  key: ItemKey,
+  layout: ControlLayout
+): Promise<void> {
   await dataSource.transaction(async (manager) => {
-    await clearChildren(manager, key);
-    await manager.getRepository(RequestItemControl).delete({
-      request: { id: key.requestId },
-      seasonNumber: matchOrNull(key.seasonNumber),
-      episodeNumber: matchOrNull(key.episodeNumber),
+    const repo = manager.getRepository(RequestItemControl);
+    const rows = await repo.find({
+      where: { request: { id: key.requestId } },
+      relations: { createdBy: true },
     });
+    const find = (s: number | null, e: number | null) =>
+      rows.find((r) => r.seasonNumber === s && r.episodeNumber === e);
+    const spread = async (
+      from: RequestItemControl,
+      targets: [number, number | null][]
+    ) => {
+      for (const [seasonNumber, episodeNumber] of targets) {
+        if (find(seasonNumber, episodeNumber)) continue;
+        rows.push(
+          await repo.save(
+            new RequestItemControl({
+              request: { id: key.requestId } as MediaRequest,
+              seasonNumber,
+              episodeNumber,
+              state: from.state,
+              pausedAtPercent: from.pausedAtPercent,
+              createdBy: from.createdBy,
+            })
+          )
+        );
+      }
+      await repo.delete({ id: from.id });
+      rows.splice(rows.indexOf(from), 1);
+    };
+
+    if (key.seasonNumber !== null) {
+      const top = find(null, null);
+      if (top) {
+        await spread(
+          top,
+          layout.map((l) => [l.seasonNumber, null])
+        );
+      }
+      const season = find(key.seasonNumber, null);
+      if (key.episodeNumber !== null && season) {
+        const episodes =
+          layout.find((l) => l.seasonNumber === key.seasonNumber)
+            ?.episodeNumbers ?? [];
+        await spread(
+          season,
+          episodes
+            .filter((e) => e !== key.episodeNumber)
+            .map((e) => [key.seasonNumber as number, e])
+        );
+      }
+    }
+    await clearIn(manager, key);
   });
 }
 

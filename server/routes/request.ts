@@ -32,8 +32,11 @@ import requestLock, {
   userKey,
 } from '@server/utils/requestLock';
 import { Router } from 'express';
+import requestLiveRoutes from './requestLive';
 
 const requestRoutes = Router();
+
+requestRoutes.use(requestLiveRoutes);
 
 requestRoutes.get<Record<string, unknown>, RequestResultsResponse>(
   '/',

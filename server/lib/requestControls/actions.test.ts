@@ -501,7 +501,7 @@ describe('request control actions', () => {
       assert.deepEqual(await rows(ctx.request.id), [[null, null, 'paused']]);
     });
 
-    it('season pause leaves episodes with files monitored', async () => {
+    it('season pause unmonitors episodes without files, then the season', async () => {
       const ctx = await seed(MediaType.TV);
       const { log } = install({
         episodes: [ep(1, { hasFile: true, episodeFileId: 501 }), ep(2), ep(3)],
@@ -512,9 +512,28 @@ describe('request control actions', () => {
       await act(ctx, 'pause', 1);
       assert.deepEqual(log, [
         ['setEpisodesMonitored', [102, 103], false],
+        ['setSeasonMonitored', 42, 1, false],
         ['stop', [PACK]],
       ]);
       assert.deepEqual(await rows(ctx.request.id), [[1, null, 'paused']]);
+    });
+
+    it('season pause unmonitors the Sonarr season', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({ episodes: [ep(1), ep(2)] });
+      await act(ctx, 'pause', 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102], false],
+        ['setSeasonMonitored', 42, 1, false],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[1, null, 'paused']]);
+    });
+
+    it('episode pause leaves the Sonarr season monitored', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({ episodes: [ep(1), ep(2)] });
+      await act(ctx, 'pause', 1, 2);
+      assert.deepEqual(log, [['setEpisodesMonitored', [102], false]]);
     });
 
     it('pause on an already paused item makes no external calls', async () => {
@@ -664,6 +683,27 @@ describe('request control actions', () => {
       assert.deepEqual(await rows(ctx.request.id), [[1, 1, 'paused']]);
     });
 
+    it('season resume re-monitors the season then unmonitors still-held episodes', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [
+          ep(1, { monitored: false }),
+          ep(2, { monitored: false }),
+          ep(3, { monitored: false }),
+        ],
+      });
+      await setControl(key(ctx.request.id, 1, null), 'paused', ctx.user.id);
+      await setControl(key(ctx.request.id, 1, 3), 'deleted', ctx.user.id);
+      await act(ctx, 'resume', 1);
+      assert.deepEqual(log, [
+        ['setSeasonMonitored', 42, 1, true],
+        ['setEpisodesMonitored', [101, 102], true],
+        ['setEpisodesMonitored', [103], false],
+        ['searchEpisodes', [101, 102]],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[1, 3, 'deleted']]);
+    });
+
     it('resume on an item with no control makes no external calls', async () => {
       const ctx = await seed(MediaType.TV);
       const { log } = install({ episodes: [ep(1)] });
@@ -717,6 +757,40 @@ describe('request control actions', () => {
       ]);
       assert.equal(transmission.remove.mock.callCount(), 0);
       assert.deepEqual(await rows(ctx.request.id), [[1, 2, 'deleted']]);
+    });
+
+    it('request-level delete unmonitors every requested season', async () => {
+      const ctx = await seed(MediaType.TV, [1, 2]);
+      const { log } = install({
+        episodes: [
+          ep(1),
+          ep(2),
+          ep(1, { id: 201, seasonNumber: 2 }),
+          ep(2, { id: 202, seasonNumber: 2 }),
+        ],
+      });
+      await act(ctx, 'delete');
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102, 201, 202], false],
+        ['setSeasonMonitored', 42, 1, false],
+        ['setSeasonMonitored', 42, 2, false],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[null, null, 'deleted']]);
+    });
+
+    it('season restore re-monitors the Sonarr season', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [ep(1, { monitored: false }), ep(2, { monitored: false })],
+      });
+      await setControl(key(ctx.request.id, 1, null), 'deleted', ctx.user.id);
+      await act(ctx, 'restore', 1);
+      assert.deepEqual(log, [
+        ['setSeasonMonitored', 42, 1, true],
+        ['setEpisodesMonitored', [101, 102], true],
+        ['searchSeason', 42, 1],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), []);
     });
 
     it('deletes a movie with its torrent and movie file', async () => {
@@ -979,6 +1053,7 @@ describe('request control actions', () => {
       await act(ctx, 'delete', 1);
       assert.deepEqual(log, [
         ['setEpisodesMonitored', [101, 102, 103], false],
+        ['setSeasonMonitored', 42, 1, false],
         ['remove', [PACK], true],
         ['deleteEpisodeFiles', [501, 502, 503]],
       ]);
@@ -1061,6 +1136,7 @@ describe('request control actions', () => {
       await act(ctx, 'delete', 1);
       assert.deepEqual(log, [
         ['setEpisodesMonitored', [101, 102], false],
+        ['setSeasonMonitored', 42, 1, false],
         ['remove', [PACK], true],
         ['deleteEpisodeFiles', [501, 502]],
       ]);
@@ -1079,6 +1155,7 @@ describe('request control actions', () => {
       await act(ctx, 'delete', 1);
       assert.deepEqual(log, [
         ['setEpisodesMonitored', [101, 102], false],
+        ['setSeasonMonitored', 42, 1, false],
         ['deleteEpisodeFiles', [501, 502]],
       ]);
     });
@@ -1102,6 +1179,7 @@ describe('request control actions', () => {
       await act(ctx, 'delete', 1);
       assert.deepEqual(log, [
         ['setEpisodesMonitored', [101, 102], false],
+        ['setSeasonMonitored', 42, 1, false],
         ['deleteEpisodeFiles', [501, 502]],
       ]);
     });
@@ -1153,6 +1231,7 @@ describe('request control actions', () => {
       await act(ctx, 'pause', 1);
       assert.deepEqual(log.splice(0), [
         ['setEpisodesMonitored', [101, 102, 103], false],
+        ['setSeasonMonitored', 42, 1, false],
         ['stop', [PACK]],
       ]);
       world.episodes = world.episodes?.map((e) => ({ ...e, monitored: false }));
@@ -1177,7 +1256,9 @@ describe('request control actions', () => {
 
       await act(ctx, 'resume', 1);
       assert.deepEqual(log, [
+        ['setSeasonMonitored', 42, 1, true],
         ['setEpisodesMonitored', [101, 102], true],
+        ['setEpisodesMonitored', [103], false],
         ['start', [PACK]],
       ]);
       assert.deepEqual(await rows(ctx.request.id), [[1, 3, 'deleted']]);
@@ -1189,7 +1270,10 @@ describe('request control actions', () => {
       await act(ctx, 'delete', 1, 3);
       log.splice(0);
       await act(ctx, 'pause', 1);
-      assert.deepEqual(log, [['setEpisodesMonitored', [101, 102], false]]);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101, 102], false],
+        ['setSeasonMonitored', 42, 1, false],
+      ]);
       assert.deepEqual(await rows(ctx.request.id), [
         [1, 3, 'deleted'],
         [1, null, 'paused'],
@@ -1211,6 +1295,7 @@ describe('request control actions', () => {
       await act(ctx, 'pause');
       assert.deepEqual(log.splice(0), [
         ['setEpisodesMonitored', [101, 102], false],
+        ['setSeasonMonitored', 42, 1, false],
       ]);
       assert.deepEqual(await rows(ctx.request.id), [
         [2, null, 'deleted'],
@@ -1218,6 +1303,7 @@ describe('request control actions', () => {
       ]);
       await act(ctx, 'resume');
       assert.deepEqual(log, [
+        ['setSeasonMonitored', 42, 1, true],
         ['setEpisodesMonitored', [101, 102], true],
         ['searchSeason', 42, 1],
       ]);

@@ -589,6 +589,38 @@ async function setMonitored(
   }
 }
 
+const wholeSeasons = (
+  ctx: ActionContext,
+  include: (seasonNumber: number) => boolean = () => true
+): number[] => {
+  if (!isTv(ctx.request) || ctx.scope.episodeNumber !== null) return [];
+  const seasons =
+    ctx.scope.seasonNumber === null
+      ? ctx.inputs.requestedSeasons
+      : [ctx.scope.seasonNumber];
+  return seasons.filter(include);
+};
+
+const seasonNotDeleted = (ctx: ActionContext) => (seasonNumber: number) =>
+  effectiveState(ctx.inputs.controls, seasonNumber, null) !== 'deleted';
+
+async function setSeasonsMonitored(
+  ctx: ActionContext,
+  seasons: number[],
+  monitored: boolean
+): Promise<void> {
+  const seriesId = ctx.target.externalId;
+  for (const seasonNumber of seasons) {
+    await call('sonarr', () =>
+      sonarrFor(ctx.target).setSeasonMonitored(
+        seriesId,
+        seasonNumber,
+        monitored
+      )
+    );
+  }
+}
+
 const queuedElsewhere = (q: QueueRecord) =>
   !getSettings().transmission.enabled || !isTorrentHash(q.downloadId);
 
@@ -743,6 +775,11 @@ async function prioritize(ctx: ActionContext): Promise<void> {
 async function pause(ctx: ActionContext, user: User, percent?: number) {
   const targets = notDeleted(ctx);
   await setMonitored(ctx, targets, false);
+  await setSeasonsMonitored(
+    ctx,
+    wholeSeasons(ctx, seasonNotDeleted(ctx)),
+    false
+  );
 
   const stop: string[] = [];
   for (const plan of holding(ctx, targets)) {
@@ -772,7 +809,19 @@ async function pause(ctx: ActionContext, user: User, percent?: number) {
 
 async function resume(ctx: ActionContext) {
   const targets = notDeleted(ctx);
+  const seasons = wholeSeasons(ctx, seasonNotDeleted(ctx));
+  await setSeasonsMonitored(ctx, seasons, true);
   await setMonitored(ctx, targets, true);
+  const held = idsOf(
+    ctx.inputs.episodes.filter(
+      (e) => seasons.includes(e.seasonNumber) && controlOf(ctx, e) === 'deleted'
+    )
+  );
+  if (held.length) {
+    await call('sonarr', () =>
+      sonarrFor(ctx.target).setEpisodesMonitored(held, false)
+    );
+  }
   await rewant(ctx, targets);
   await search(ctx, targets);
   const layout = layoutOf(ctx.inputs);
@@ -784,6 +833,7 @@ async function resume(ctx: ActionContext) {
 
 async function restore(ctx: ActionContext) {
   const pending = ctx.episodes.filter((e) => !e.hasFile);
+  await setSeasonsMonitored(ctx, wholeSeasons(ctx), true);
   await setMonitored(ctx, ctx.episodes, true);
   await rewant(ctx, pending);
   await search(ctx, pending);
@@ -798,6 +848,7 @@ async function remove(ctx: ActionContext, user: User) {
       );
 
   await setMonitored(ctx, ctx.episodes, false);
+  await setSeasonsMonitored(ctx, wholeSeasons(ctx), false);
 
   const removeFromTransmission: string[] = [];
   for (const plan of ctx.torrents) {

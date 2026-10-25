@@ -264,6 +264,42 @@ describe('deriveRequestState', () => {
     assert.deepEqual(state.seasons[0].actions, ['restore']);
   });
 
+  it('deleted TV request without a target still renders deleted seasons with restore', () => {
+    const state = deriveRequestState(
+      input({
+        requestedSeasons: [1, 2],
+        controls: [control('deleted', null, null)],
+      })
+    );
+    assert.deepEqual(
+      state.seasons.map((s) => [s.seasonNumber, s.status, s.actions]),
+      [
+        [1, 'deleted', ['restore']],
+        [2, 'deleted', ['restore']],
+      ]
+    );
+    assert.equal(state.summary.status, 'deleted');
+    assert.deepEqual(state.actions, ['restore']);
+  });
+
+  it('a TV request without a target shows an uncontrolled season as unknown beside a deleted one', () => {
+    const state = deriveRequestState(
+      input({
+        requestedSeasons: [1, 2],
+        controls: [control('deleted', 2, null)],
+      })
+    );
+    assert.deepEqual(
+      state.seasons.map((s) => [s.seasonNumber, s.status]),
+      [
+        [1, 'unknown'],
+        [2, 'deleted'],
+      ]
+    );
+    assert.deepEqual(state.seasons[1].actions, ['restore']);
+    assert.equal(state.summary.status, 'unknown');
+  });
+
   it('deleted season carries controlSince', () => {
     const at = new Date('2026-10-25T19:46:00.000Z');
     const state = deriveRequestState(

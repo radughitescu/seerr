@@ -359,8 +359,11 @@ export class LiveStatusHub {
       if (!request) {
         next = this.unavailable(requestId);
       } else {
-        target = sources.serviceTarget(request);
-        inputs = await sources.loadRequestInputs(request, round);
+        const resolution = await sources.resolveTarget(request);
+        if (resolution.status === 'found') {
+          target = resolution.target;
+        }
+        inputs = await sources.loadRequestInputs(request, round, resolution);
         next = deriveRequestState(inputs);
       }
     } catch (e) {

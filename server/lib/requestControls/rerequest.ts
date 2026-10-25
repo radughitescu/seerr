@@ -12,7 +12,7 @@ import type { MediaRequestBody } from '@server/interfaces/api/requestInterfaces'
 import { Permission } from '@server/lib/permissions';
 import { requestableSeasons } from '@server/lib/requestableSeasons';
 import { canViewRequest } from '@server/routes/requestLive';
-import { actions, assertControllable } from './actions';
+import { TargetMissingError, actions, assertControllable } from './actions';
 import { effectiveState, getControls } from './store';
 
 export type ReRequestResult = {
@@ -89,6 +89,7 @@ export async function reRequestControlled(
       seasonNumber,
       episodeNumber,
       user,
+      deferReAdd: true,
     });
 
   for (const request of requests) {
@@ -106,7 +107,12 @@ export async function reRequestControlled(
         continue;
       }
       assertControllable(request);
-      await run(request, state, null, null);
+      try {
+        await run(request, state, null, null);
+      } catch (e) {
+        if (!(e instanceof TargetMissingError)) throw e;
+        await actions.reAdd(request, null, user);
+      }
       converted ??= request;
       continue;
     }
@@ -123,27 +129,33 @@ export async function reRequestControlled(
     }
     assertControllable(request);
 
-    let current = controls;
-    const top = effectiveState(current, null, null);
-    if (top !== null) {
-      await run(request, top, null, null);
-      current = await getControls(request.id);
-    }
-
-    for (const seasonNumber of seasons) {
-      const seasonState = current.find(
-        (c) => c.seasonNumber === seasonNumber && c.episodeNumber === null
-      )?.state;
-      if (seasonState) {
-        await run(request, seasonState, seasonNumber, null);
+    try {
+      let current = controls;
+      const top = effectiveState(current, null, null);
+      if (top !== null) {
+        await run(request, top, null, null);
         current = await getControls(request.id);
       }
-      for (const row of current.filter(
-        (c) => c.seasonNumber === seasonNumber && c.episodeNumber !== null
-      )) {
-        await run(request, row.state, seasonNumber, row.episodeNumber);
+
+      for (const seasonNumber of seasons) {
+        const seasonState = current.find(
+          (c) => c.seasonNumber === seasonNumber && c.episodeNumber === null
+        )?.state;
+        if (seasonState) {
+          await run(request, seasonState, seasonNumber, null);
+          current = await getControls(request.id);
+        }
+        for (const row of current.filter(
+          (c) => c.seasonNumber === seasonNumber && c.episodeNumber !== null
+        )) {
+          await run(request, row.state, seasonNumber, row.episodeNumber);
+        }
+        covered.add(seasonNumber);
       }
-      covered.add(seasonNumber);
+    } catch (e) {
+      if (!(e instanceof TargetMissingError)) throw e;
+      await actions.reAdd(request, seasons, user);
+      seasons.forEach((seasonNumber) => covered.add(seasonNumber));
     }
     converted ??= request;
   }

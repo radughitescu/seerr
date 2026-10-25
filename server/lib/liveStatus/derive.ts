@@ -353,9 +353,10 @@ export function deriveRequestState(input: RequestInputs): RequestLiveState {
           build(seasonNumber, e.episodeNumber, e, queueFor(e.id, undefined))
         );
       builtAll.push(...builts);
+      const held = effectiveState(input.controls, seasonNumber, null);
       const status = builts.length
         ? mostActive(builts.map((b) => b.item.status))
-        : 'unknown';
+        : (held ?? 'unknown');
       const season: SeasonState = {
         seasonNumber,
         status,
@@ -397,9 +398,17 @@ export function deriveRequestState(input: RequestInputs): RequestLiveState {
   }
 
   const items = builtAll.map((b) => b.item);
-  const status = items.length
-    ? mostActive(items.map((i) => i.status))
-    : 'unknown';
+  const statuses = [
+    ...items.map((i) => i.status),
+    ...seasons
+      .filter(
+        (season) =>
+          season.episodes.length === 0 &&
+          (items.length === 0 || season.status !== 'unknown')
+      )
+      .map((season) => season.status),
+  ];
+  const status = statuses.length ? mostActive(statuses) : 'unknown';
 
   let totalWeight = 0;
   let totalDone = 0;

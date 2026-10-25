@@ -320,6 +320,66 @@ describe('loadRequestInputs', () => {
     assert.deepEqual(result.requestedSeasons, [1, 2]);
   });
 
+  it('looks the series up by tvdbId when availability sync cleared the external id', async () => {
+    const lookup = mock.fn(async (tvdbId: number) => [{ id: 42, tvdbId }]);
+    const sonarr = fakeSonarr({ getLibrarySeriesByTvdbId: lookup });
+    mock.method(
+      clients,
+      'sonarr',
+      (() => sonarr) as unknown as typeof clients.sonarr
+    );
+
+    const result = await loadRequestInputs(
+      tvRequest({
+        media: { externalServiceId: null, serviceId: null, tvdbId: 401 },
+      })
+    );
+
+    assert.deepEqual(lookup.mock.calls[0].arguments, [401]);
+    assert.equal(sonarr.getEpisodes.mock.calls[0].arguments[0], 42);
+    assert.equal(result.seriesId, 42);
+    assert.deepEqual(result.failedSources, []);
+  });
+
+  it('a series missing from Sonarr yields no episodes and no failure', async () => {
+    const sonarr = fakeSonarr({
+      getLibrarySeriesByTvdbId: mock.fn(async () => []),
+    });
+    mock.method(
+      clients,
+      'sonarr',
+      (() => sonarr) as unknown as typeof clients.sonarr
+    );
+
+    const result = await loadRequestInputs(
+      tvRequest({ media: { externalServiceId: null, tvdbId: 401 } })
+    );
+
+    assert.equal(sonarr.getEpisodes.mock.callCount(), 0);
+    assert.deepEqual(result.episodes, []);
+    assert.deepEqual(result.failedSources, []);
+  });
+
+  it('a failed series lookup marks sonarr failed', async () => {
+    const sonarr = fakeSonarr({
+      getLibrarySeriesByTvdbId: mock.fn(async () => {
+        throw new Error('timeout');
+      }),
+    });
+    mock.method(
+      clients,
+      'sonarr',
+      (() => sonarr) as unknown as typeof clients.sonarr
+    );
+
+    const result = await loadRequestInputs(
+      tvRequest({ media: { externalServiceId: null, tvdbId: 401 } })
+    );
+
+    assert.equal(sonarr.getEpisodes.mock.callCount(), 0);
+    assert.deepEqual(result.failedSources, ['sonarr']);
+  });
+
   it('sources: transmission disabled yields no torrents and no failure', async () => {
     getSettings().transmission = {
       ...getSettings().transmission,

@@ -73,6 +73,23 @@ export function serverFor<T extends DVRSettings>(
   return server;
 }
 
+export const serviceKind = (request: MediaRequest): ServiceKind =>
+  request.type === MediaType.MOVIE ? 'radarr' : 'sonarr';
+
+function targetServer(request: MediaRequest): DVRSettings | undefined {
+  const settings = getSettings();
+  const servers: DVRSettings[] =
+    serviceKind(request) === 'radarr' ? settings.radarr : settings.sonarr;
+  const mediaServiceId = request.is4k
+    ? request.media?.serviceId4k
+    : request.media?.serviceId;
+  return (
+    (mediaServiceId !== null && mediaServiceId !== undefined
+      ? servers.find((s) => s.id === mediaServiceId)
+      : undefined) ?? serverFor(servers, request)
+  );
+}
+
 export function serviceTarget(
   request: MediaRequest
 ): ServiceTarget | undefined {
@@ -82,19 +99,68 @@ export function serviceTarget(
   if (externalId === null || externalId === undefined) {
     return undefined;
   }
-  const kind: ServiceKind =
-    request.type === MediaType.MOVIE ? 'radarr' : 'sonarr';
-  const settings = getSettings();
-  const servers: DVRSettings[] =
-    kind === 'radarr' ? settings.radarr : settings.sonarr;
-  const mediaServiceId = request.is4k
-    ? request.media?.serviceId4k
-    : request.media?.serviceId;
-  const server =
-    (mediaServiceId !== null && mediaServiceId !== undefined
-      ? servers.find((s) => s.id === mediaServiceId)
-      : undefined) ?? serverFor(servers, request);
-  return { kind, serverId: server?.id, externalId };
+  return {
+    kind: serviceKind(request),
+    serverId: targetServer(request)?.id,
+    externalId,
+  };
+}
+
+export type TargetResolution =
+  | { status: 'found'; target: ServiceTarget }
+  | { status: 'missing'; kind: ServiceKind; serverId: number }
+  | { status: 'failed'; kind: ServiceKind; message: string }
+  | { status: 'unconfigured' };
+
+export async function resolveTarget(
+  request: MediaRequest
+): Promise<TargetResolution> {
+  const target = serviceTarget(request);
+  if (target) {
+    return { status: 'found', target };
+  }
+  const kind = serviceKind(request);
+  const server = targetServer(request);
+  if (!server) {
+    return { status: 'unconfigured' };
+  }
+  const missing: TargetResolution = {
+    status: 'missing',
+    kind,
+    serverId: server.id,
+  };
+  try {
+    let externalId: number | undefined;
+    if (kind === 'sonarr') {
+      const tvdbId = request.media?.tvdbId;
+      if (!tvdbId) return missing;
+      const series = await clients
+        .sonarr(server as SonarrSettings)
+        .getLibrarySeriesByTvdbId(tvdbId);
+      externalId = series.find((s) => s.id && s.tvdbId === tvdbId)?.id;
+    } else {
+      const tmdbId = request.media?.tmdbId;
+      if (!tmdbId) return missing;
+      const movies = await clients
+        .radarr(server as RadarrSettings)
+        .getLibraryMoviesByTmdbId(tmdbId);
+      externalId = movies.find((m) => m.id && m.tmdbId === tmdbId)?.id;
+    }
+    return externalId
+      ? {
+          status: 'found',
+          target: { kind, serverId: server.id, externalId },
+        }
+      : missing;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    logger.warn('Failed to look up request in Servarr', {
+      label: 'LiveStatus',
+      requestId: request.id,
+      errorMessage: message,
+    });
+    return { status: 'failed', kind, message };
+  }
 }
 
 export type ServarrRound = {
@@ -175,7 +241,8 @@ const searchBodies = (
 
 export async function loadRequestInputs(
   request: MediaRequest,
-  round: ServarrRound = newRound()
+  round: ServarrRound = newRound(),
+  resolved?: TargetResolution
 ): Promise<RequestInputs> {
   const type = request.type === MediaType.MOVIE ? 'movie' : 'tv';
   const inputs: RequestInputs = {
@@ -196,10 +263,15 @@ export async function loadRequestInputs(
     failedSources: [],
   };
 
-  const target = serviceTarget(request);
-  if (!target) {
+  const resolution = resolved ?? (await resolveTarget(request));
+  if (resolution.status === 'failed') {
+    inputs.failedSources = [resolution.kind];
     return inputs;
   }
+  if (resolution.status !== 'found') {
+    return inputs;
+  }
+  const target = resolution.target;
 
   const failed = new Set<Source>();
   const settings = getSettings();
@@ -318,5 +390,6 @@ export const sources = {
   findRequest,
   loadRequestInputs,
   loadTorrents,
+  resolveTarget,
   serviceTarget,
 };

@@ -29,6 +29,7 @@ import { MediaRequestSubscriber } from '@server/subscriber/MediaRequestSubscribe
 import { setupTestDb } from '@server/test/db';
 import { ActionError, ServiceError, runAction } from './actions';
 import { getDeletePreview } from './preview';
+import { reRequestControlled } from './rerequest';
 import { getControls, setControl } from './store';
 
 setupTestDb();
@@ -72,6 +73,7 @@ type World = {
   movie?: { hasFile: boolean; monitored?: boolean };
   movieFiles?: { id: number; path: string; size: number }[];
   history?: History[];
+  inLibrary?: boolean;
 };
 
 type History = {
@@ -193,6 +195,9 @@ function install(world: World) {
       (world.history ?? []).filter((h) => h.movieId === undefined)
     ),
     getCommands: mock.fn(async () => []),
+    getLibrarySeriesByTvdbId: mock.fn(async (tvdbId: number) =>
+      world.inLibrary === false ? [] : [{ id: 42, tvdbId }]
+    ),
     setEpisodesMonitored: mock.fn(write('setEpisodesMonitored')),
     setSeasonMonitored: mock.fn(write('setSeasonMonitored')),
     searchEpisodes: mock.fn(write('searchEpisodes')),
@@ -220,6 +225,9 @@ function install(world: World) {
       (world.history ?? []).filter((h) => h.movieId !== undefined)
     ),
     getCommands: mock.fn(async () => []),
+    getLibraryMoviesByTmdbId: mock.fn(async (tmdbId: number) =>
+      world.inLibrary === false ? [] : [{ id: 9, tmdbId }]
+    ),
     setMovieMonitored: mock.fn(write('setMovieMonitored')),
     searchMovie: mock.fn(write('searchMovie')),
     searchMovieStrict: mock.fn(write('searchMovieStrict')),
@@ -293,6 +301,21 @@ async function seed(type: MediaType, seasons: number[] = [1]) {
     where: { id: saved.id },
   });
   return { request, user };
+}
+
+async function availabilitySynced(ctx: { request: MediaRequest; user: User }) {
+  await getRepository(Media).update(ctx.request.media.id, {
+    status: MediaStatus.DELETED,
+    serviceId: null,
+    externalServiceId: null,
+  } as unknown as Partial<Media>);
+  await getRepository(MediaRequest).update(ctx.request.id, {
+    status: MediaRequestStatus.COMPLETED,
+  });
+  const request = await getRepository(MediaRequest).findOneOrFail({
+    where: { id: ctx.request.id },
+  });
+  return { request, user: ctx.user };
 }
 
 const act = (
@@ -1030,6 +1053,129 @@ describe('request control actions', () => {
         (e: unknown) => e instanceof ServiceError && e.service === 'radarr'
       );
       assert.deepEqual(await rows(ctx.request.id), [[null, null, 'deleted']]);
+    });
+  });
+
+  describe('after availability sync clears the external id', () => {
+    it('restore works after availability sync nulls externalServiceId (series still in Sonarr)', async () => {
+      const seeded = await seed(MediaType.TV);
+      const { log, sonarr } = install({
+        episodes: [ep(1, { monitored: false }), ep(2, { monitored: false })],
+      });
+      await setControl(
+        key(seeded.request.id, 1, null),
+        'deleted',
+        seeded.user.id
+      );
+      const ctx = await availabilitySynced(seeded);
+      assert.equal(ctx.request.media.externalServiceId, null);
+      await act(ctx, 'restore', 1);
+      assert.deepEqual(log, [
+        ['setSeasonMonitored', 42, 1, true],
+        ['setEpisodesMonitored', [101, 102], true],
+        ['searchSeason', 42, 1],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), []);
+      assert.deepEqual(
+        sonarr.getLibrarySeriesByTvdbId.mock.calls[0].arguments,
+        [401]
+      );
+      const media = await getRepository(Media).findOneOrFail({
+        where: { id: ctx.request.media.id },
+      });
+      assert.equal(media.externalServiceId, null);
+    });
+
+    it('restore re-adds a movie removed from Radarr through sendToRadarr', async () => {
+      const seeded = await seed(MediaType.MOVIE);
+      const { log } = install({ inLibrary: false });
+      await setControl(
+        key(seeded.request.id, null, null),
+        'deleted',
+        seeded.user.id
+      );
+      const ctx = await availabilitySynced(seeded);
+      const send = mock.method(
+        MediaRequestSubscriber.prototype,
+        'sendToRadarr',
+        async () => undefined
+      );
+      await act(ctx, 'restore');
+      assert.equal(send.mock.callCount(), 1);
+      const [sent] = send.mock.calls[0].arguments as unknown as [MediaRequest];
+      assert.equal(sent.id, ctx.request.id);
+      assert.equal(sent.status, MediaRequestStatus.APPROVED);
+      assert.deepEqual(log, []);
+      assert.deepEqual(await rows(ctx.request.id), []);
+      const saved = await getRepository(MediaRequest).findOneOrFail({
+        where: { id: ctx.request.id },
+      });
+      assert.equal(saved.status, MediaRequestStatus.APPROVED);
+    });
+
+    it('pause on a movie removed from Radarr returns 409', async () => {
+      const seeded = await seed(MediaType.MOVIE);
+      const { log } = install({ inLibrary: false });
+      const ctx = await availabilitySynced(seeded);
+      await assert.rejects(
+        act(ctx, 'pause'),
+        (e: unknown) =>
+          e instanceof ActionError &&
+          e.status === 409 &&
+          e.message ===
+            'This movie is no longer in Radarr. Restore it to add it again.'
+      );
+      assert.deepEqual(log, []);
+      assert.deepEqual(await rows(ctx.request.id), []);
+    });
+
+    it('re-request of a deleted completed series after availability sync restores instead of 400', async () => {
+      const seeded = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [ep(1, { monitored: false }), ep(2, { monitored: false })],
+      });
+      await setControl(
+        key(seeded.request.id, 1, null),
+        'deleted',
+        seeded.user.id
+      );
+      const ctx = await availabilitySynced(seeded);
+      const result = await reRequestControlled(
+        { mediaType: MediaType.TV, mediaId: 400, seasons: [1] },
+        ctx.user
+      );
+      assert.equal(result?.request.id, ctx.request.id);
+      assert.deepEqual(result?.remainingSeasons, []);
+      assert.deepEqual(log, [
+        ['setSeasonMonitored', 42, 1, true],
+        ['setEpisodesMonitored', [101, 102], true],
+        ['searchSeason', 42, 1],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), []);
+    });
+
+    it('re-request of a series removed from Sonarr clears its rows and re-adds it once through sendToSonarr', async () => {
+      const seeded = await seed(MediaType.TV, [1, 2, 3]);
+      const { log } = install({ inLibrary: false });
+      const id = seeded.request.id;
+      await setControl(key(id, 1, null), 'deleted', seeded.user.id);
+      await setControl(key(id, 2, 4), 'deleted', seeded.user.id);
+      await setControl(key(id, 3, null), 'paused', seeded.user.id);
+      const ctx = await availabilitySynced(seeded);
+      const send = mock.method(
+        MediaRequestSubscriber.prototype,
+        'sendToSonarr',
+        async () => undefined
+      );
+      const result = await reRequestControlled(
+        { mediaType: MediaType.TV, mediaId: 400, seasons: [1, 2] },
+        ctx.user
+      );
+      assert.equal(result?.request.id, id);
+      assert.deepEqual(result?.remainingSeasons, []);
+      assert.equal(send.mock.callCount(), 1);
+      assert.deepEqual(log, []);
+      assert.deepEqual(await rows(id), [[3, null, 'paused']]);
     });
   });
 

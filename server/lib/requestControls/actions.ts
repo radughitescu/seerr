@@ -4,7 +4,8 @@ import type SonarrAPI from '@server/api/servarr/sonarr';
 import type TransmissionAPI from '@server/api/transmission';
 import type { TorrentInfo } from '@server/api/transmission';
 import { MediaRequestStatus, MediaType } from '@server/constants/media';
-import type { MediaRequest } from '@server/entity/MediaRequest';
+import { getRepository } from '@server/datasource';
+import { MediaRequest } from '@server/entity/MediaRequest';
 import type { RequestItemControl } from '@server/entity/RequestItemControl';
 import type { User } from '@server/entity/User';
 import {
@@ -16,9 +17,12 @@ import {
   clients,
   loadRequestInputs,
   loadTorrents,
-  serviceTarget,
+  newRound,
+  resolveTarget,
   torrentHashes,
+  type ServiceKind,
   type ServiceTarget,
+  type TargetResolution,
 } from '@server/lib/liveStatus/sources';
 import type {
   ItemAction,
@@ -27,6 +31,7 @@ import type {
 } from '@server/lib/liveStatus/types';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
+import { MediaRequestSubscriber } from '@server/subscriber/MediaRequestSubscriber';
 import { isExtraFile, mapFilesToEpisodes } from './fileMap';
 import {
   effectiveState,
@@ -65,12 +70,28 @@ export class ActionError extends Error {
   }
 }
 
+export class TargetMissingError extends ActionError {
+  public readonly kind: ServiceKind;
+
+  constructor(kind: ServiceKind) {
+    super(
+      409,
+      kind === 'sonarr'
+        ? 'This series is no longer in Sonarr. Restore it to add it again.'
+        : 'This movie is no longer in Radarr. Restore it to add it again.'
+    );
+    this.name = 'TargetMissingError';
+    this.kind = kind;
+  }
+}
+
 export type ActionRequest = {
   request: MediaRequest;
   action: ItemAction;
   seasonNumber: number | null;
   episodeNumber: number | null;
   user: User;
+  deferReAdd?: boolean;
 };
 
 export type Scope = {
@@ -394,18 +415,30 @@ async function loadHistory(
   return call('radarr', () => radarrFor(target).getMovieHistory(id));
 }
 
+function targetOf(resolution: TargetResolution): ServiceTarget {
+  switch (resolution.status) {
+    case 'found':
+      return resolution.target;
+    case 'missing':
+      throw new TargetMissingError(resolution.kind);
+    case 'failed':
+      throw new ServiceError(resolution.kind, resolution.message);
+    default:
+      throw new ActionError(
+        400,
+        'This request has not been added to Sonarr or Radarr yet.'
+      );
+  }
+}
+
 export async function loadContext(
   request: MediaRequest,
-  scope: Scope
+  scope: Scope,
+  resolved?: TargetResolution
 ): Promise<ActionContext> {
-  const target = serviceTarget(request);
-  if (!target) {
-    throw new ActionError(
-      400,
-      'This request has not been added to Sonarr or Radarr yet.'
-    );
-  }
-  const inputs = await loadRequestInputs(request);
+  const resolution = resolved ?? (await resolveTarget(request));
+  const target = targetOf(resolution);
+  const inputs = await loadRequestInputs(request, newRound(), resolution);
   const fatal = inputs.failedSources.find((s) => s !== 'transmission');
   if (fatal) {
     throw new ServiceError(fatal, `${SERVICE_LABEL[fatal]} is unavailable.`);
@@ -945,6 +978,103 @@ async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+async function sendAgain(request: MediaRequest, user: User): Promise<void> {
+  const repository = getRepository(MediaRequest);
+  const fresh = await repository.findOneOrFail({ where: { id: request.id } });
+  logger.info('Re-adding request to Sonarr or Radarr', {
+    label: 'Request Controls',
+    requestId: request.id,
+    userId: user.id,
+  });
+  if (fresh.status !== MediaRequestStatus.APPROVED) {
+    fresh.status = MediaRequestStatus.APPROVED;
+    fresh.modifiedBy = user;
+    await repository.save(fresh);
+    return;
+  }
+  const subscriber = new MediaRequestSubscriber();
+  if (isTv(fresh)) {
+    await subscriber.sendToSonarr(fresh, repository.manager);
+  } else {
+    await subscriber.sendToRadarr(fresh, repository.manager);
+  }
+}
+
+const releaseLayout = (request: MediaRequest): ControlLayout =>
+  [...new Set((request.seasons ?? []).map((s) => s.seasonNumber))].map(
+    (seasonNumber) => ({ seasonNumber, episodeNumbers: [] })
+  );
+
+async function reAddScopes(
+  request: MediaRequest,
+  keys: ItemKey[],
+  user: User
+): Promise<RequestLiveState> {
+  const layout = releaseLayout(request);
+  for (const key of keys) {
+    await releaseControl(key, layout);
+  }
+  await sendAgain(request, user);
+  await liveStatusHub.refresh(request.id);
+  return currentState(request);
+}
+
+async function restoreMissing(
+  request: MediaRequest,
+  scope: Scope,
+  user: User,
+  resolution: TargetResolution
+): Promise<RequestLiveState> {
+  const inputs = await loadRequestInputs(request, newRound(), resolution);
+  if (
+    scope.seasonNumber !== null &&
+    !inputs.requestedSeasons.includes(scope.seasonNumber)
+  ) {
+    throw new ActionError(400, 'This season is not part of the request.');
+  }
+  const item = scopeItem(deriveRequestState(inputs), scope);
+  if (!item || !item.actions.includes('restore')) {
+    throw new ActionError(
+      400,
+      'Cannot restore this item in its current state.'
+    );
+  }
+  return reAddScopes(
+    request,
+    [
+      {
+        requestId: request.id,
+        seasonNumber: scope.seasonNumber,
+        episodeNumber: scope.episodeNumber,
+      },
+    ],
+    user
+  );
+}
+
+export async function reAdd(
+  request: MediaRequest,
+  seasons: number[] | null,
+  user: User
+): Promise<RequestLiveState> {
+  assertControllable(request);
+  return withLock(
+    lockKey(request.id, { seasonNumber: null, episodeNumber: null }),
+    () =>
+      reAddScopes(
+        request,
+        seasons === null
+          ? [{ requestId: request.id, seasonNumber: null, episodeNumber: null }]
+          : seasons.map((seasonNumber) => ({
+              requestId: request.id,
+              seasonNumber,
+              episodeNumber: null,
+            })),
+        user
+      )
+  );
+}
+
 async function currentState(request: MediaRequest): Promise<RequestLiveState> {
   return (
     liveStatusHub.cachedState(request.id) ??
@@ -966,7 +1096,15 @@ export async function runAction(req: ActionRequest): Promise<RequestLiveState> {
       return currentState(request);
     }
 
-    const loaded = await loadContext(request, scope);
+    const resolution = await resolveTarget(request);
+    if (resolution.status === 'missing') {
+      if (action === 'restore' && !req.deferReAdd) {
+        return restoreMissing(request, scope, user, resolution);
+      }
+      throw new TargetMissingError(resolution.kind);
+    }
+
+    const loaded = await loadContext(request, scope, resolution);
     const item = scopeItem(loaded.state, scope);
     if (!item || !item.actions.includes(action)) {
       throw new ActionError(
@@ -1017,4 +1155,4 @@ export async function runAction(req: ActionRequest): Promise<RequestLiveState> {
   });
 }
 
-export const actions = { runAction };
+export const actions = { runAction, reAdd };

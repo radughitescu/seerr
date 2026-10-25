@@ -1192,4 +1192,148 @@ describe('request control actions', () => {
       ]);
     });
   });
+
+  describe('expansion and pack safety', () => {
+    const multi = (status: TorrentInfo['status'] = 4) =>
+      torrent(SINGLE, [['Show.S01E01E02.mkv', 2000, 500]], { status });
+
+    it('delete E1 does not expand to E2 through a history-only multi-episode torrent when E2 has its own file', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [
+          ep(1, { hasFile: true, episodeFileId: 501 }),
+          ep(2, { hasFile: true, episodeFileId: 502 }),
+          ep(3),
+        ],
+        episodeFiles: [
+          { id: 501, path: '/tv/Show/S01E01.mkv', size: 1000 },
+          { id: 502, path: '/tv/Show/S01E02.mkv', size: 1000 },
+        ],
+        history: grabbed(SINGLE, 101, 102),
+        torrents: [multi(6)],
+      });
+      const preview = await getDeletePreview(ctx.request, 1, 1);
+      assert.deepEqual(
+        preview.files.map((f) => f.episodes),
+        [['S01E01']]
+      );
+      await act(ctx, 'delete', 1, 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101], false],
+        ['setFilesWanted', SINGLE, [0], false],
+        ['deleteEpisodeFiles', [501]],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[1, 1, 'deleted']]);
+    });
+
+    it('pause expansion skips a deleted sibling', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [ep(1), ep(2)],
+        queue: [q(1, SINGLE, 101), q(2, SINGLE, 102)],
+        torrents: [multi()],
+      });
+      await setControl(key(ctx.request.id, 1, 2), 'deleted', ctx.user.id);
+      await act(ctx, 'pause', 1, 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101], false],
+        ['stop', [SINGLE]],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [
+        [1, 2, 'deleted'],
+        [1, 1, 'paused'],
+      ]);
+    });
+
+    it('resume expansion keeps a deleted sibling deleted', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [ep(1, { monitored: false }), ep(2, { monitored: false })],
+        queue: [q(1, SINGLE, 101), q(2, SINGLE, 102)],
+        torrents: [multi(0)],
+      });
+      await setControl(key(ctx.request.id, 1, 2), 'deleted', ctx.user.id);
+      await setControl(key(ctx.request.id, 1, 1), 'paused', ctx.user.id);
+      await act(ctx, 'resume', 1, 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101], true],
+        ['start', [SINGLE]],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[1, 2, 'deleted']]);
+    });
+
+    it('pause expansion writes no paused row for a sibling with a file', async () => {
+      const ctx = await seed(MediaType.TV);
+      const { log } = install({
+        episodes: [ep(1), ep(2, { hasFile: true, episodeFileId: 502 })],
+        queue: [q(1, SINGLE, 101), q(2, SINGLE, 102)],
+        torrents: [multi()],
+      });
+      await act(ctx, 'pause', 1, 1);
+      assert.deepEqual(log, [
+        ['setEpisodesMonitored', [101], false],
+        ['setFilesWanted', SINGLE, [0], false],
+      ]);
+      assert.deepEqual(await rows(ctx.request.id), [[1, 1, 'paused']]);
+    });
+
+    it('movie delete keeps a multi-movie pack torrent and reports torrentKept', async () => {
+      const ctx = await seed(MediaType.MOVIE);
+      const { log } = install({
+        movie: { hasFile: true },
+        movieFiles: [{ id: 900, path: '/movies/Movie.2.mkv', size: 1000 }],
+        history: [{ movieId: 9, downloadId: PACK, eventType: 'grabbed' }],
+        torrents: [
+          torrent(
+            PACK,
+            [
+              ['Trilogy/Movie.1.mkv', 1000, 1000],
+              ['Trilogy/Movie.2.mkv', 1000, 1000],
+              ['Trilogy/Movie.3.mkv', 1000, 1000],
+              ['Trilogy/Movie.2.sample.mkv', 10, 10],
+              ['Trilogy/info.nfo', 1, 1],
+            ],
+            { status: 6 }
+          ),
+        ],
+      });
+      const preview = await getDeletePreview(ctx.request, null, null);
+      assert.deepEqual(preview, {
+        files: [{ path: '/movies/Movie.2.mkv', bytes: 1000, episodes: [] }],
+        bytesFreed: 0,
+        torrentKept: true,
+      });
+      await act(ctx, 'delete');
+      assert.deepEqual(log, [
+        ['setMovieMonitored', 9, false],
+        ['deleteMovieFile', 900],
+      ]);
+    });
+
+    it('movie delete removes a single-movie torrent with sample and extras', async () => {
+      const ctx = await seed(MediaType.MOVIE);
+      const { log } = install({
+        movie: { hasFile: true },
+        movieFiles: [{ id: 900, path: '/movies/Movie.mkv', size: 1000 }],
+        history: [{ movieId: 9, downloadId: PACK, eventType: 'grabbed' }],
+        torrents: [
+          torrent(
+            PACK,
+            [
+              ['Movie/Movie.mkv', 1000, 1000],
+              ['Movie/Sample/Movie.sample.mkv', 10, 10],
+              ['Movie/Movie.nfo', 1, 1],
+            ],
+            { status: 6 }
+          ),
+        ],
+      });
+      await act(ctx, 'delete');
+      assert.deepEqual(log, [
+        ['setMovieMonitored', 9, false],
+        ['remove', [PACK], true],
+        ['deleteMovieFile', 900],
+      ]);
+    });
+  });
 });

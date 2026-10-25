@@ -248,11 +248,13 @@ export function planTorrents(
     );
 
     if (ctx.inputs.type === 'movie') {
+      const media = torrent.files.filter((f) => !isExtraFile(f.name));
+      const covered = media.length === 1;
       plans.push({
         torrent,
-        covered: true,
-        unmappedMedia: false,
-        fileIndexes: torrent.files.map((f) => f.index),
+        covered,
+        unmappedMedia: !covered,
+        fileIndexes: covered ? torrent.files.map((f) => f.index) : [],
         keyIndexes: new Map(),
         episodeIds: new Set(),
         queueIds,
@@ -304,7 +306,7 @@ export function expandByFiles(
 ): Episode[] {
   const byKey = new Map(inputs.episodes.map((e) => [episodeKey(e), e]));
   const result = new Map(episodes.map((e) => [episodeKey(e), e]));
-  const groups: string[][] = [];
+  const groups: { keys: string[]; library: boolean }[] = [];
 
   const byFile = new Map<number, string[]>();
   for (const e of inputs.episodes) {
@@ -314,26 +316,35 @@ export function expandByFiles(
       episodeKey(e),
     ]);
   }
-  groups.push(...byFile.values());
+  groups.push(...[...byFile.values()].map((keys) => ({ keys, library: true })));
 
-  for (const torrent of known) {
+  const tracked = known.filter(
+    (t) => recordsFor(inputs.queue, t.hashString).length > 0
+  );
+  for (const torrent of tracked) {
     const byIndex = new Map<number, string[]>();
     for (const [key, indexes] of mapFilesToEpisodes(torrent.files)) {
       for (const index of indexes) {
         byIndex.set(index, [...(byIndex.get(index) ?? []), key]);
       }
     }
-    groups.push(...byIndex.values());
+    groups.push(
+      ...[...byIndex.values()].map((keys) => ({ keys, library: false }))
+    );
   }
 
   let changed = true;
   while (changed) {
     changed = false;
     for (const group of groups) {
-      if (!group.some((key) => result.has(key))) continue;
-      for (const key of group) {
+      if (!group.keys.some((key) => result.has(key))) continue;
+      for (const key of group.keys) {
         const episode = byKey.get(key);
-        if (episode && !result.has(key)) {
+        if (
+          episode &&
+          !result.has(key) &&
+          (group.library || !episode.hasFile)
+        ) {
           result.set(key, episode);
           changed = true;
         }
@@ -643,10 +654,13 @@ const itemKey = (ctx: ActionContext): ItemKey => ({
   episodeNumber: ctx.scope.episodeNumber,
 });
 
-const extraKeys = (ctx: ActionContext): ItemKey[] => {
+const extraKeys = (
+  ctx: ActionContext,
+  include: (e: Episode) => boolean = () => true
+): ItemKey[] => {
   const original = new Set(ctx.base.map(episodeKey));
   return ctx.episodes
-    .filter((e) => !original.has(episodeKey(e)))
+    .filter((e) => !original.has(episodeKey(e)) && include(e))
     .map((e) => ({
       requestId: ctx.request.id,
       seasonNumber: e.seasonNumber,
@@ -707,7 +721,9 @@ async function pause(ctx: ActionContext, user: User, percent?: number) {
   }
 
   await setControl(itemKey(ctx), 'paused', user.id, percent);
-  for (const key of extraKeys(ctx)) {
+  const pausable = (e: Episode) =>
+    !e.hasFile && controlOf(ctx, e) !== 'deleted';
+  for (const key of extraKeys(ctx, pausable)) {
     await setControl(key, 'paused', user.id, percent);
   }
 }
@@ -719,7 +735,7 @@ async function resume(ctx: ActionContext) {
   await search(ctx, targets);
   const layout = layoutOf(ctx.inputs);
   await releaseControl(itemKey(ctx), layout, { keepDeleted: true });
-  for (const key of extraKeys(ctx)) {
+  for (const key of extraKeys(ctx, (e) => controlOf(ctx, e) !== 'deleted')) {
     await releaseControl(key, layout, { keepDeleted: true });
   }
 }

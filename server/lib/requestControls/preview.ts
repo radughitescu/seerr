@@ -61,7 +61,7 @@ export async function getDeletePreview(
   if (isMovie) {
     for (const file of library) {
       preview.files.push({ path: file.path, bytes: file.size, episodes: [] });
-      preview.bytesFreed += file.size;
+      if (!kept.length) preview.bytesFreed += file.size;
     }
   } else {
     const byId = new Map(library.map((f) => [f.id, f]));

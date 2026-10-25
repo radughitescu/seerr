@@ -1,4 +1,5 @@
 import RadarrAPI from '@server/api/servarr/radarr';
+import liveStatusHub from '@server/lib/liveStatus/hub';
 import type { RadarrSettings } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
@@ -32,6 +33,7 @@ radarrRoutes.post('/', async (req, res) => {
 
   settings.radarr = [...settings.radarr, newRadarr];
   await settings.save();
+  liveStatusHub.restartServarr();
 
   return res.status(201).json(newRadarr);
 });
@@ -103,6 +105,7 @@ radarrRoutes.put<{ id: string }, RadarrSettings, RadarrSettings>(
       id: Number(req.params.id),
     } as RadarrSettings;
     await settings.save();
+    liveStatusHub.restartServarr();
 
     return res.status(200).json(settings.radarr[radarrIndex]);
   }
@@ -147,6 +150,7 @@ radarrRoutes.delete<{ id: string }>('/:id', async (req, res, next) => {
 
   const removed = settings.radarr.splice(radarrIndex, 1);
   await settings.save();
+  liveStatusHub.restartServarr();
 
   return res.status(200).json(removed[0]);
 });

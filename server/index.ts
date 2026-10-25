@@ -6,6 +6,7 @@ import { Session } from '@server/entity/Session';
 import { User } from '@server/entity/User';
 import { initI18n } from '@server/i18n';
 import { startJobs } from '@server/job/schedule';
+import liveStatusHub from '@server/lib/liveStatus/hub';
 import notificationManager from '@server/lib/notifications';
 import DiscordAgent from '@server/lib/notifications/agents/discord';
 import EmailAgent from '@server/lib/notifications/agents/email';
@@ -150,6 +151,8 @@ app
       new WebhookAgent(),
       new WebPushAgent(),
     ]);
+
+    liveStatusHub.startServarr();
 
     const userRepository = getRepository(User);
     const totalUsers = await userRepository.count();

@@ -99,18 +99,30 @@ class TransmissionAPI {
   }
 
   public async getTorrents(hashes: string[]): Promise<TorrentInfo[]> {
+    if (hashes.length === 0) {
+      return [];
+    }
     const res = await this.rpc<{ torrents: TorrentInfo[] }>('torrent-get', {
       ids: lower(hashes),
       fields: TORRENT_FIELDS,
     });
-    return res.torrents;
+    return res.torrents.map((t) => ({
+      ...t,
+      files: (t.files ?? []).map((f, i) => ({ ...f, index: i })),
+    }));
   }
 
   public async start(hashes: string[]): Promise<void> {
+    if (hashes.length === 0) {
+      return;
+    }
     await this.rpc('torrent-start', { ids: lower(hashes) });
   }
 
   public async stop(hashes: string[]): Promise<void> {
+    if (hashes.length === 0) {
+      return;
+    }
     await this.rpc('torrent-stop', { ids: lower(hashes) });
   }
 
@@ -118,6 +130,9 @@ class TransmissionAPI {
     hashes: string[],
     deleteLocalData: boolean
   ): Promise<void> {
+    if (hashes.length === 0) {
+      return;
+    }
     await this.rpc('torrent-remove', {
       ids: lower(hashes),
       'delete-local-data': deleteLocalData,
@@ -129,6 +144,9 @@ class TransmissionAPI {
     fileIndexes: number[],
     wanted: boolean
   ): Promise<void> {
+    if (fileIndexes.length === 0) {
+      return;
+    }
     await this.rpc('torrent-set', {
       ids: lower([hash]),
       [wanted ? 'files-wanted' : 'files-unwanted']: fileIndexes,
@@ -139,6 +157,9 @@ class TransmissionAPI {
     hash: string,
     fileIndexes: number[]
   ): Promise<void> {
+    if (fileIndexes.length === 0) {
+      return;
+    }
     await this.rpc('torrent-set', {
       ids: lower([hash]),
       'priority-high': fileIndexes,
@@ -146,10 +167,16 @@ class TransmissionAPI {
   }
 
   public async queueMoveTop(hashes: string[]): Promise<void> {
+    if (hashes.length === 0) {
+      return;
+    }
     await this.rpc('queue-move-top', { ids: lower(hashes) });
   }
 
   public async setBandwidthPriorityHigh(hashes: string[]): Promise<void> {
+    if (hashes.length === 0) {
+      return;
+    }
     await this.rpc('torrent-set', {
       ids: lower(hashes),
       bandwidthPriority: 1,

@@ -53,12 +53,29 @@ describe('TransmissionAPI', () => {
   it('getTorrents sends torrent-get with lowercase hashes and the TorrentInfo fields', async () => {
     const api = build();
     const post = mock.method(getAxios(api), 'post', async () => ({
-      data: { result: 'success', arguments: { torrents: [{ name: 'x' }] } },
+      data: {
+        result: 'success',
+        arguments: {
+          torrents: [
+            {
+              name: 'x',
+              files: [
+                { name: 'a', length: 1, bytesCompleted: 0 },
+                { name: 'b', length: 2, bytesCompleted: 0 },
+              ],
+            },
+          ],
+        },
+      },
     }));
 
     const torrents = await api.getTorrents(['ABCDEF', 'AbC123']);
 
     assert.strictEqual(torrents.length, 1);
+    assert.deepStrictEqual(
+      torrents[0].files.map((f) => f.index),
+      [0, 1]
+    );
     const body = post.mock.calls[0].arguments[1] as {
       method: string;
       arguments: { ids: string[]; fields: string[] };
@@ -102,5 +119,18 @@ describe('TransmissionAPI', () => {
     assert.strictEqual(body.method, 'torrent-remove');
     assert.strictEqual(body.arguments['delete-local-data'], true);
     assert.deepStrictEqual(body.arguments.ids, ['abc']);
+  });
+
+  it('makes no HTTP call for empty hash lists', async () => {
+    const api = build();
+    const post = mock.method(getAxios(api), 'post', async () => ({
+      data: { result: 'success', arguments: {} },
+    }));
+
+    await api.remove([], true);
+    assert.deepStrictEqual(await api.getTorrents([]), []);
+    await api.setFilesWanted('abc', [], true);
+
+    assert.strictEqual(post.mock.callCount(), 0);
   });
 });

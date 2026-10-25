@@ -25,6 +25,7 @@ export type LiveListener = (e: LiveEvent) => void;
 
 export const POLL_INTERVAL_MS = 2000;
 export const FULL_ROUND_MS = 30000;
+export const QUEUE_REFRESH_MS = 10000;
 
 const FULL_ROUND_TICKS = FULL_ROUND_MS / POLL_INTERVAL_MS;
 
@@ -50,6 +51,8 @@ export class LiveStatusHub {
   private timer?: ReturnType<typeof setInterval>;
   private stopServarrSignalR?: () => void;
   private servarrStarted = false;
+  private queueRefreshedAt = new Map<string, number>();
+  private queueTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   public subscribe(requestIds: number[], listener: LiveListener): () => void {
     const sub: Subscription = {
@@ -137,18 +140,52 @@ export class LiveStatusHub {
     const target = servarrEventTarget(msg);
     if (target === null) return;
     if (target === 'all') {
-      const ids = this.matching(
-        (t) =>
-          t.kind === kind &&
-          (t.serverId === undefined || t.serverId === serverId)
-      );
-      const round = newRound();
-      void Promise.all(ids.map((id) => this.refresh(id, round)));
+      if (msg.name === 'queue') {
+        this.throttleQueue(kind, serverId);
+      } else {
+        this.refreshAll(kind, serverId);
+      }
       return;
     }
     void Promise.all(
       target.map((id) => this.refreshByService(kind, id, serverId))
     );
+  }
+
+  private refreshAll(kind: ServiceKind, serverId: number): void {
+    const ids = this.matching(
+      (t) =>
+        t.kind === kind && (t.serverId === undefined || t.serverId === serverId)
+    );
+    const round = newRound();
+    void Promise.all(ids.map((id) => this.refresh(id, round)));
+  }
+
+  private throttleQueue(kind: ServiceKind, serverId: number): void {
+    const key = `${kind}:${serverId}`;
+    const now = Date.now();
+    const last = this.queueRefreshedAt.get(key);
+    if (last === undefined || now - last >= QUEUE_REFRESH_MS) {
+      this.queueRefreshedAt.set(key, now);
+      this.refreshAll(kind, serverId);
+      return;
+    }
+    if (this.queueTimers.has(key)) return;
+    const timer = setTimeout(
+      () => {
+        this.queueTimers.delete(key);
+        this.queueRefreshedAt.set(key, Date.now());
+        this.refreshAll(kind, serverId);
+      },
+      QUEUE_REFRESH_MS - (now - last)
+    );
+    this.queueTimers.set(key, timer);
+  }
+
+  private clearQueueTimers(): void {
+    for (const timer of this.queueTimers.values()) clearTimeout(timer);
+    this.queueTimers.clear();
+    this.queueRefreshedAt.clear();
   }
 
   public cachedState(requestId: number): RequestLiveState | undefined {
@@ -212,6 +249,7 @@ export class LiveStatusHub {
       clearInterval(this.timer);
       this.timer = undefined;
     }
+    this.clearQueueTimers();
   }
 
   private forget(requestId: number): void {

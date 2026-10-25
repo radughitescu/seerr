@@ -60,7 +60,9 @@ describe('servarrEventTarget', () => {
     assert.deepEqual(
       servarrEventTarget({
         name: 'command',
-        body: { resource: { body: { movieIds: [8, 9] } } },
+        body: {
+          resource: { name: 'MoviesSearch', body: { movieIds: [8, 9] } },
+        },
       }),
       [8, 9]
     );
@@ -74,7 +76,37 @@ describe('servarrEventTarget', () => {
     assert.equal(
       servarrEventTarget({
         name: 'command',
-        body: { resource: { body: { episodeIds: [1] } } },
+        body: {
+          resource: { name: 'EpisodeSearch', body: { episodeIds: [1] } },
+        },
+      }),
+      'all'
+    );
+  });
+
+  it('reacts only to search, scan, refresh and download processing commands', () => {
+    const command = (name: string, body: Record<string, unknown> = {}) =>
+      servarrEventTarget({
+        name: 'command',
+        body: { resource: { name, body } },
+      });
+    for (const name of [
+      'RssSync',
+      'RefreshMonitoredDownloads',
+      'Housekeeping',
+      'MessagingCleanup',
+      'CheckHealth',
+    ]) {
+      assert.equal(command(name), null, name);
+    }
+    assert.deepEqual(command('SeriesSearch', { seriesId: 4 }), [4]);
+    assert.deepEqual(command('RescanMovie', { movieIds: [6] }), [6]);
+    assert.equal(command('ProcessMonitoredDownloads'), 'all');
+    assert.equal(command('MissingEpisodeSearch'), 'all');
+    assert.equal(
+      servarrEventTarget({
+        name: 'command',
+        body: { resource: { body: { name: 'DownloadedEpisodesScan' } } },
       }),
       'all'
     );

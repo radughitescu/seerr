@@ -569,6 +569,70 @@ describe('LiveStatusHub', () => {
     assert.equal(load.mock.callCount(), 3);
   });
 
+  it('queue events without ids refresh at most once per 10000 ms', async () => {
+    mock.timers.reset();
+    mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const load = mock.method(sources, 'loadRequestInputs', (async (
+      r: MediaRequest
+    ) => inputs(r.id)) as typeof sources.loadRequestInputs);
+    hub.subscribe([1, 2], () => undefined);
+    await flush();
+    assert.equal(load.mock.callCount(), 2);
+
+    const queue = { name: 'queue', body: { action: 'sync' } };
+    hub.handleServarrEvent('sonarr', 0, queue);
+    await flush();
+    assert.equal(load.mock.callCount(), 4);
+
+    for (let i = 0; i < 5; i++) {
+      hub.handleServarrEvent('sonarr', 0, queue);
+    }
+    await flush();
+    assert.equal(load.mock.callCount(), 4);
+
+    mock.timers.tick(9999);
+    await flush();
+    assert.equal(load.mock.callCount(), 4);
+    mock.timers.tick(1);
+    await flush();
+    assert.equal(load.mock.callCount(), 6);
+
+    mock.timers.tick(20000);
+    await flush();
+    assert.equal(load.mock.callCount(), 6);
+  });
+
+  it('command events other than searches, scans and refreshes trigger no round', async () => {
+    const load = mock.method(sources, 'loadRequestInputs', (async (
+      r: MediaRequest
+    ) => inputs(r.id)) as typeof sources.loadRequestInputs);
+    hub.subscribe([1, 2], () => undefined);
+    await flush();
+
+    for (const name of [
+      'RssSync',
+      'RefreshMonitoredDownloads',
+      'Housekeeping',
+    ]) {
+      hub.handleServarrEvent('sonarr', 0, {
+        name: 'command',
+        body: { action: 'updated', resource: { name, body: {} } },
+      });
+    }
+    await flush();
+    assert.equal(load.mock.callCount(), 2);
+
+    hub.handleServarrEvent('sonarr', 0, {
+      name: 'command',
+      body: {
+        action: 'updated',
+        resource: { name: 'SeriesSearch', body: { seriesId: 5 } },
+      },
+    });
+    await flush();
+    assert.equal(load.mock.callCount(), 4);
+  });
+
   it('servarr queue event refreshes every subscribed request of that kind', async () => {
     const load = mock.method(sources, 'loadRequestInputs', (async (
       r: MediaRequest

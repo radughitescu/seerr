@@ -28,15 +28,32 @@ export const SERVARR_EVENTS = [
   'moviefile',
 ];
 
+export const REFRESH_COMMANDS = [
+  'EpisodeSearch',
+  'SeasonSearch',
+  'SeriesSearch',
+  'MissingEpisodeSearch',
+  'MoviesSearch',
+  'MissingMoviesSearch',
+  'DownloadedEpisodesScan',
+  'DownloadedMoviesScan',
+  'RefreshSeries',
+  'RefreshMovie',
+  'RescanSeries',
+  'RescanMovie',
+  'ProcessMonitoredDownloads',
+];
+
 const START_RETRY_MS = 30000;
 const MAX_RECONNECT_MS = 60000;
 const RECONNECT_STEPS = [0, 2000, 10000, 30000];
 
 type Resource = {
   id?: number;
+  name?: string;
   seriesId?: number;
   movieId?: number;
-  body?: { seriesId?: number; movieIds?: number[] };
+  body?: { name?: string; seriesId?: number; movieIds?: number[] };
 };
 
 const isNumber = (v: unknown): v is number =>
@@ -61,9 +78,14 @@ export function servarrEventTarget(
     case 'moviefile':
       ids = [resource?.movieId];
       break;
-    case 'command':
+    case 'command': {
+      const command = resource?.name ?? resource?.body?.name;
+      if (!command || !REFRESH_COMMANDS.includes(command)) {
+        return null;
+      }
       ids = [resource?.body?.seriesId, ...(resource?.body?.movieIds ?? [])];
       break;
+    }
   }
   const found = ids.filter(isNumber);
   return found.length ? found : 'all';

@@ -69,10 +69,10 @@ const PRIORITY: ItemStatus[] = [
   'stalled',
   'failed',
   'not_found',
+  'unknown',
   'paused',
   'on_plex',
   'deleted',
-  'unknown',
 ];
 
 const selectedBytes = (t: TorrentInfo, indexes?: number[]) => {

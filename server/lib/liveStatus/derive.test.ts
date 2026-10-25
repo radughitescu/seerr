@@ -240,6 +240,30 @@ describe('deriveRequestState', () => {
     assert.deepEqual(state.seasons[0].episodes[0].actions, ['delete']);
   });
 
+  it('season with an unknown episode and a deleted episode is unknown and offers pause', () => {
+    const state = deriveRequestState(
+      input({
+        controls: [control('deleted', 1, 2)],
+        episodes: [ep(1), ep(2)],
+      })
+    );
+    assert.equal(state.seasons[0].episodes[0].status, 'unknown');
+    assert.equal(state.seasons[0].status, 'unknown');
+    assert.ok(state.seasons[0].actions.includes('pause'));
+    assert.equal(state.summary.status, 'unknown');
+  });
+
+  it('season with only deleted episodes is deleted', () => {
+    const state = deriveRequestState(
+      input({
+        controls: [control('deleted', 1, 1), control('deleted', 1, 2)],
+        episodes: [ep(1), ep(2)],
+      })
+    );
+    assert.equal(state.seasons[0].status, 'deleted');
+    assert.deepEqual(state.seasons[0].actions, ['restore']);
+  });
+
   it('summary counts ready/paused/deleted', () => {
     const state = deriveRequestState(
       input({

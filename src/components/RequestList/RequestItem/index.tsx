@@ -3,6 +3,8 @@ import Badge from '@app/components/Common/Badge';
 import Button from '@app/components/Common/Button';
 import CachedImage from '@app/components/Common/CachedImage';
 import ConfirmButton from '@app/components/Common/ConfirmButton';
+import type { LiveAction } from '@app/components/RequestList/LiveCard';
+import LiveCard from '@app/components/RequestList/LiveCard';
 import RequestModal from '@app/components/RequestModal';
 import StatusBadge from '@app/components/StatusBadge';
 import useDeepLinks from '@app/hooks/useDeepLinks';
@@ -25,6 +27,7 @@ import { MediaRequestStatus, MediaStatus } from '@server/constants/media';
 import type { MediaRequest } from '@server/entity/MediaRequest';
 import type { NonFunctionProperties } from '@server/interfaces/api/common';
 import type { RequestResultsResponse } from '@server/interfaces/api/requestInterfaces';
+import type { RequestLiveState } from '@server/lib/liveStatus/types';
 import type { MovieDetails } from '@server/models/Movie';
 import type { TvDetails } from '@server/models/Tv';
 import axios from 'axios';
@@ -45,6 +48,7 @@ const messages = defineMessages('components.RequestList.RequestItem', {
   mediaerror: '{mediaType} Not Found',
   editrequest: 'Edit Request',
   deleterequest: 'Delete Request',
+  removefromlist: 'Remove from list',
   cancelRequest: 'Cancel Request',
   tmdbid: 'TMDB ID',
   tvdbid: 'TheTVDB ID',
@@ -157,6 +161,7 @@ const RequestItemError = ({
                     is4k={requestData.is4k}
                     mediaType={requestData.type}
                     plexUrl={requestData.is4k ? plexUrl4k : plexUrl}
+                    disableLink
                     serviceUrl={
                       requestData.is4k
                         ? requestData.media.serviceUrl4k
@@ -294,9 +299,36 @@ const RequestItemError = ({
 interface RequestItemProps {
   request: RequestResultsResponse['results'][number];
   revalidateList: () => void;
+  liveState?: RequestLiveState;
+  onLiveState?: (state: RequestLiveState) => void;
 }
 
-const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
+export const isLiveRequestStatus = (status: MediaRequestStatus): boolean =>
+  status === MediaRequestStatus.APPROVED ||
+  status === MediaRequestStatus.COMPLETED;
+
+const LiveFrame = ({
+  footer,
+  children,
+}: {
+  footer?: React.ReactNode;
+  children: React.ReactNode;
+}) =>
+  footer ? (
+    <div className="w-full overflow-hidden rounded-xl bg-gray-800 shadow-md ring-1 ring-gray-700">
+      {children}
+      {footer}
+    </div>
+  ) : (
+    <>{children}</>
+  );
+
+const RequestItem = ({
+  request,
+  revalidateList,
+  liveState,
+  onLiveState,
+}: RequestItemProps) => {
   const { ref, inView } = useInView({
     triggerOnce: true,
   });
@@ -389,6 +421,18 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
     }
   };
 
+  const runControl: LiveAction = async (
+    action,
+    seasonNumber,
+    episodeNumber
+  ) => {
+    const { data } = await axios.post<RequestLiveState>(
+      `/api/v1/request/${request.id}/control`,
+      { action, seasonNumber, episodeNumber }
+    );
+    onLiveState?.(data);
+  };
+
   const { mediaUrl: plexUrl, mediaUrl4k: plexUrl4k } = useDeepLinks({
     mediaUrl: requestData?.media?.mediaUrl,
     mediaUrl4k: requestData?.media?.mediaUrl4k,
@@ -421,8 +465,21 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
       : []
   );
 
+  const live = isLiveRequestStatus(requestData.status);
+
   return (
-    <>
+    <LiveFrame
+      footer={
+        live && (
+          <LiveCard
+            request={requestData}
+            state={liveState}
+            title={isMovie(title) ? title.title : title.name}
+            onAction={runControl}
+          />
+        )
+      }
+    >
       <RequestModal
         show={showEditModal}
         tmdbId={request.media.tmdbId}
@@ -435,7 +492,11 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
           setShowEditModal(false);
         }}
       />
-      <div className="relative flex w-full flex-col justify-between overflow-hidden rounded-xl bg-gray-800 py-2 text-gray-400 shadow-md ring-1 ring-gray-700 xl:h-28 xl:flex-row">
+      <div
+        className={`relative flex w-full flex-col justify-between overflow-hidden bg-gray-800 py-2 text-gray-400 xl:h-28 xl:flex-row ${
+          live ? '' : 'rounded-xl shadow-md ring-1 ring-gray-700'
+        }`}
+      >
         {title.backdropPath && (
           <div className="absolute inset-0 z-0 w-full bg-cover bg-center xl:w-2/3">
             <CachedImage
@@ -518,7 +579,11 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
             </div>
           </div>
           <div className="z-10 ml-4 mt-4 flex w-full flex-col justify-center gap-1 overflow-hidden pr-4 text-sm sm:ml-2 sm:mt-0 xl:flex-1 xl:pr-0">
-            <div className="card-field">
+            <div
+              className={`card-field ${
+                live && liveState?.available ? 'hidden' : ''
+              }`}
+            >
               <span className="card-field-name">
                 {intl.formatMessage(globalMessages.status)}
               </span>
@@ -554,6 +619,7 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
                   tmdbId={requestData.media.tmdbId}
                   mediaType={requestData.type}
                   plexUrl={requestData.is4k ? plexUrl4k : plexUrl}
+                  disableLink
                   serviceUrl={
                     requestData.is4k
                       ? requestData.media.serviceUrl4k
@@ -709,7 +775,7 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
                   className="w-full"
                 >
                   <TrashIcon />
-                  <span>{intl.formatMessage(messages.deleterequest)}</span>
+                  <span>{intl.formatMessage(messages.removefromlist)}</span>
                 </ConfirmButton>
                 {request.canRemove && (
                   <ConfirmButton
@@ -785,7 +851,7 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
             )}
         </div>
       </div>
-    </>
+    </LiveFrame>
   );
 };
 

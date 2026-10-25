@@ -32,6 +32,7 @@ interface StatusBadgeProps {
   mediaType?: 'movie' | 'tv';
   title?: string | string[];
   statusLabelOverride?: string;
+  disableLink?: boolean;
 }
 
 const StatusBadge = ({
@@ -45,6 +46,7 @@ const StatusBadge = ({
   mediaType,
   title,
   statusLabelOverride,
+  disableLink = false,
 }: StatusBadgeProps) => {
   const intl = useIntl();
   const { hasPermission } = useUser();
@@ -58,6 +60,7 @@ const StatusBadge = ({
   };
 
   if (
+    !disableLink &&
     mediaType &&
     plexUrl &&
     hasPermission(
@@ -92,7 +95,7 @@ const StatusBadge = ({
             ? 'Plex'
             : 'Jellyfin',
     });
-  } else if (hasPermission(Permission.MANAGE_REQUESTS)) {
+  } else if (!disableLink && hasPermission(Permission.MANAGE_REQUESTS)) {
     if (mediaType && tmdbId) {
       mediaLink = `/${mediaType}/${tmdbId}?manage=1`;
       mediaLinkDescription = intl.formatMessage(messages.managemedia, {

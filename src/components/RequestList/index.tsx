@@ -3,7 +3,10 @@ import Header from '@app/components/Common/Header';
 import LoadingSpinner from '@app/components/Common/LoadingSpinner';
 import PageTitle from '@app/components/Common/PageTitle';
 import Tooltip from '@app/components/Common/Tooltip';
-import RequestItem from '@app/components/RequestList/RequestItem';
+import RequestItem, {
+  isLiveRequestStatus,
+} from '@app/components/RequestList/RequestItem';
+import useLiveRequests, { MAX_LIVE_IDS } from '@app/hooks/useLiveRequests';
 import { useUpdateQueryParams } from '@app/hooks/useUpdateQueryParams';
 import { Permission, useUser } from '@app/hooks/useUser';
 import globalMessages from '@app/i18n/globalMessages';
@@ -21,7 +24,7 @@ import {
 import type { RequestResultsResponse } from '@server/interfaces/api/requestInterfaces';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useIntl } from 'react-intl';
 import useSWR from 'swr';
 
@@ -86,6 +89,16 @@ const RequestList = () => {
           : ''
     }`
   );
+
+  const liveIds = useMemo(
+    () =>
+      (data?.results ?? [])
+        .filter((request) => isLiveRequestStatus(request.status))
+        .map((request) => request.id)
+        .slice(0, MAX_LIVE_IDS),
+    [data]
+  );
+  const { states: liveStates, replaceState } = useLiveRequests(liveIds);
 
   // Restore last set filter values on component mount
   useEffect(() => {
@@ -316,6 +329,8 @@ const RequestList = () => {
             <RequestItem
               request={request}
               revalidateList={() => revalidate()}
+              liveState={liveStates[request.id]}
+              onLiveState={replaceState}
             />
           </div>
         );

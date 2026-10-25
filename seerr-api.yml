@@ -6836,6 +6836,8 @@ paths:
           description: Not allowed to view this request
         '404':
           description: Request not found
+        '409':
+          description: Request is not approved or completed, or the item cannot be controlled in its current state
         '502':
           description: Sonarr, Radarr or Transmission failed
           content:
@@ -6905,6 +6907,8 @@ paths:
           description: Not allowed to view this request
         '404':
           description: Request not found
+        '409':
+          description: Request is not approved or completed, or the item cannot be controlled in its current state
         '502':
           description: Sonarr, Radarr or Transmission failed
   /request/{requestId}:

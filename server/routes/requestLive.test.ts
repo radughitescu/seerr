@@ -22,6 +22,7 @@ import {
   type ActionRequest,
 } from '@server/lib/requestControls/actions';
 import { previews } from '@server/lib/requestControls/preview';
+import { getControls } from '@server/lib/requestControls/store';
 import { getSettings } from '@server/lib/settings';
 import { checkUser } from '@server/middleware/auth';
 import { MediaRequestSubscriber } from '@server/subscriber/MediaRequestSubscriber';
@@ -112,7 +113,10 @@ async function loginAs(email: string) {
 
 let tmdbId = 1000;
 
-async function seedRequest(ownerEmail: string) {
+async function seedRequest(
+  ownerEmail: string,
+  status = MediaRequestStatus.APPROVED
+) {
   const owner = await getRepository(User).findOneOrFail({
     where: { email: ownerEmail },
   });
@@ -126,7 +130,7 @@ async function seedRequest(ownerEmail: string) {
   return getRepository(MediaRequest).save(
     new MediaRequest({
       type: MediaType.MOVIE,
-      status: MediaRequestStatus.APPROVED,
+      status,
       media,
       requestedBy: owner,
       is4k: false,
@@ -292,6 +296,23 @@ describe('POST /request/:requestId/control', () => {
       .send({ action: 'pause' });
     assert.strictEqual(res.status, 404);
   });
+
+  it('control on a PENDING request returns 409', async () => {
+    const mediaRequest = await seedRequest(
+      'demo@seerr.dev',
+      MediaRequestStatus.PENDING
+    );
+    const agent = await loginAs('demo@seerr.dev');
+    const res = await agent
+      .post(`/request/${mediaRequest.id}/control`)
+      .send({ action: 'pause' });
+    assert.strictEqual(res.status, 409);
+    assert.strictEqual(
+      res.body.message,
+      'Only approved requests can be controlled.'
+    );
+    assert.deepStrictEqual(await getControls(mediaRequest.id), []);
+  });
 });
 
 describe('GET /request/:requestId/control/delete-preview', () => {
@@ -333,6 +354,22 @@ describe('GET /request/:requestId/control/delete-preview', () => {
     assert.strictEqual((args[0] as MediaRequest).id, mediaRequest.id);
     assert.strictEqual(args[1], 1);
     assert.strictEqual(args[2], 2);
+  });
+
+  it('delete-preview on a DECLINED request returns 409', async () => {
+    const mediaRequest = await seedRequest(
+      'demo@seerr.dev',
+      MediaRequestStatus.DECLINED
+    );
+    const agent = await loginAs('demo@seerr.dev');
+    const res = await agent.get(
+      `/request/${mediaRequest.id}/control/delete-preview`
+    );
+    assert.strictEqual(res.status, 409);
+    assert.strictEqual(
+      res.body.message,
+      'Only approved requests can be controlled.'
+    );
   });
 });
 

@@ -3,6 +3,7 @@ import type { MediaRequest } from '@server/entity/MediaRequest';
 import { clients } from '@server/lib/liveStatus/sources';
 import { getSettings } from '@server/lib/settings';
 import {
+  assertControllable,
   checkScopeShape,
   deleteContext,
   episodeKey,
@@ -52,6 +53,7 @@ export async function getDeletePreview(
   episodeNumber: number | null
 ): Promise<DeletePreview> {
   const scope: Scope = { seasonNumber, episodeNumber };
+  assertControllable(request);
   checkScopeShape(request, scope);
   const ctx = deleteContext(await loadContext(request, scope));
   const isMovie = request.type === MediaType.MOVIE;

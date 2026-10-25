@@ -3,7 +3,7 @@ import type RadarrAPI from '@server/api/servarr/radarr';
 import type SonarrAPI from '@server/api/servarr/sonarr';
 import type TransmissionAPI from '@server/api/transmission';
 import type { TorrentInfo } from '@server/api/transmission';
-import { MediaType } from '@server/constants/media';
+import { MediaRequestStatus, MediaType } from '@server/constants/media';
 import type { MediaRequest } from '@server/entity/MediaRequest';
 import type { RequestItemControl } from '@server/entity/RequestItemControl';
 import type { User } from '@server/entity/User';
@@ -136,6 +136,17 @@ async function call<T>(service: ServiceName, fn: () => Promise<T>): Promise<T> {
 }
 
 const isTv = (request: MediaRequest) => request.type !== MediaType.MOVIE;
+
+const CONTROLLABLE = [
+  MediaRequestStatus.APPROVED,
+  MediaRequestStatus.COMPLETED,
+];
+
+export function assertControllable(request: MediaRequest): void {
+  if (!CONTROLLABLE.includes(request.status)) {
+    throw new ActionError(409, 'Only approved requests can be controlled.');
+  }
+}
 
 export function checkScopeShape(request: MediaRequest, scope: Scope): void {
   const valid = (n: number | null) =>
@@ -865,6 +876,7 @@ export async function runAction(req: ActionRequest): Promise<RequestLiveState> {
     seasonNumber: req.seasonNumber,
     episodeNumber: req.episodeNumber,
   };
+  assertControllable(request);
   checkScopeShape(request, scope);
 
   return withLock(lockKey(request.id, scope), async () => {

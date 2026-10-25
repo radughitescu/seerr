@@ -12,7 +12,7 @@ import type { MediaRequestBody } from '@server/interfaces/api/requestInterfaces'
 import { Permission } from '@server/lib/permissions';
 import { requestableSeasons } from '@server/lib/requestableSeasons';
 import { canViewRequest } from '@server/routes/requestLive';
-import { actions } from './actions';
+import { actions, assertControllable } from './actions';
 import { effectiveState, getControls } from './store';
 
 export type ReRequestResult = {
@@ -105,6 +105,7 @@ export async function reRequestControlled(
       if (state === null) {
         continue;
       }
+      assertControllable(request);
       await run(request, state, null, null);
       converted ??= request;
       continue;
@@ -120,6 +121,7 @@ export async function reRequestControlled(
     if (seasons.length === 0) {
       continue;
     }
+    assertControllable(request);
 
     let current = controls;
     const top = effectiveState(current, null, null);

@@ -1,0 +1,91 @@
+<style>
+.sx{font-family:Inter,system-ui,sans-serif;color:#e5e7eb}
+.sx .card{background:#1f2937;border:1px solid #374151;border-radius:12px;padding:14px;margin:8px 0}
+.sx .row{display:flex;gap:12px;align-items:center}
+.sx .poster{width:54px;height:80px;border-radius:6px;background:linear-gradient(160deg,#334155,#0f172a);flex:none;display:flex;align-items:flex-end;justify-content:center;font-size:9px;color:#94a3b8;padding-bottom:4px}
+.sx .t{font-weight:700;font-size:16px}
+.sx .m{font-size:12px;color:#9ca3af}
+.sx .pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.sx .p-dl{background:#1e3a8a;color:#bfdbfe}
+.sx .p-ok{background:#14532d;color:#bbf7d0}
+.sx .p-q{background:#374151;color:#d1d5db}
+.sx .p-pa{background:#78350f;color:#fde68a}
+.sx .p-de{background:#3f1d1d;color:#fca5a5}
+.sx .bar{height:6px;background:#374151;border-radius:3px;overflow:hidden;margin:6px 0}
+.sx .bar>i{display:block;height:100%;background:#6366f1}
+.sx .btn{font-size:12px;font-weight:600;padding:5px 10px;border-radius:6px;border:1px solid #4b5563;background:#374151;color:#e5e7eb;white-space:nowrap;display:inline-block}
+.sx .btn.plex{background:#e5a00d;border-color:#e5a00d;color:#111}
+.sx .btn.red{background:transparent;border-color:#991b1b;color:#fca5a5}
+.sx .btn.amb{background:transparent;border-color:#92400e;color:#fcd34d}
+.sx .btn.grn{background:transparent;border-color:#166534;color:#86efac}
+.sx .ico{min-width:24px;height:24px;padding:0 5px;border-radius:5px;border:1px solid #4b5563;display:inline-flex;align-items:center;justify-content:center;font-size:11px;color:#d1d5db;gap:3px}
+.sx .ico.red{border-color:#7f1d1d;color:#fca5a5}
+.sx .ico.amb{border-color:#92400e;color:#fcd34d}
+.sx .ico.grn{border-color:#166534;color:#86efac}
+.sx .season{border-top:1px solid #374151;margin-top:10px;padding-top:8px}
+.sx .ep{display:grid;grid-template-columns:44px 1fr 150px 110px;gap:8px;align-items:center;font-size:12px;padding:4px 0;border-bottom:1px dashed #2d3748}
+.sx .ep .n{color:#9ca3af}
+.sx .ep.dim{opacity:.55}
+.sx .mini{height:4px;background:#374151;border-radius:2px;overflow:hidden;margin-top:3px}
+.sx .mini>i{display:block;height:100%;background:#6366f1}
+.sx .mini.pa>i{background:#d97706}
+.sx .acts{display:flex;gap:4px;justify-content:flex-end}
+.sx .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin:6px 0 2px}
+.sx .modal{background:#111827;border:1px solid #7f1d1d;border-radius:10px;padding:12px;margin-top:10px;font-size:13px}
+</style>
+
+<h2>Variant A v2: Pause and Delete as separate buttons</h2>
+<p class="subtitle">⏸ Pause = stop downloading, keep what's on Plex and the partial download. ▶ Resume continues where it stopped.<br>🗑 Delete = remove download and files from Plex. ↻ Restore = search and download again.</p>
+
+<div class="sx">
+<div class="legend">
+ <span><span class="ico">⇡</span> Prioritize</span>
+ <span><span class="ico amb">⏸</span> Pause</span>
+ <span><span class="ico grn">▶</span> Resume</span>
+ <span><span class="ico red">🗑</span> Delete</span>
+ <span><span class="ico grn">↻</span> Restore</span>
+</div>
+
+<div class="card">
+ <div class="row">
+  <div class="poster">THE TERROR</div>
+  <div style="flex:1">
+   <div class="t">The Terror <span class="m">(2018)</span></div>
+   <div class="m">Requested by demetraneacsu · today 19:32 · auto-approved</div>
+   <div style="margin-top:6px"><span class="pill p-dl">● Downloading 41% · 3/10 ready · 1 paused · ETA 22 min</span></div>
+   <div class="bar"><i style="width:41%"></i></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:6px;align-items:stretch">
+   <span class="btn plex">▶ Play on Plex</span>
+   <span class="btn amb">⏸ Pause all</span>
+   <span class="btn red">🗑 Delete request</span>
+  </div>
+ </div>
+
+ <div class="season">
+  <div class="row" style="justify-content:space-between">
+   <div><b style="font-size:13px">▾ Season 1</b> <span class="m">· 1080p WEB-DL playWEB · 19.1 GB · 12 peers · 8.4 MB/s</span></div>
+   <div class="acts"><span class="ico">⇡</span><span class="ico amb">⏸</span><span class="ico red">🗑</span></div>
+  </div>
+  <div class="ep"><span class="n">E01</span><span>Go for Broke</span><span class="pill p-ok">✓ On Plex</span><span class="acts"><span class="ico red">🗑</span></span></div>
+  <div class="ep"><span class="n">E02</span><span>Gore</span><span class="pill p-ok">✓ On Plex</span><span class="acts"><span class="ico red">🗑</span></span></div>
+  <div class="ep"><span class="n">E03</span><span>The Ladder</span><span class="pill p-ok">✓ On Plex</span><span class="acts"><span class="ico red">🗑</span></span></div>
+  <div class="ep"><span class="n">E04</span><span>Punished, as a Boy</span><span><span class="pill p-dl">Downloading 78%</span><div class="mini"><i style="width:78%"></i></div></span><span class="acts"><span class="ico">⇡</span><span class="ico amb">⏸</span><span class="ico red">🗑</span></span></div>
+  <div class="ep"><span class="n">E05</span><span>Horrible from Supper</span><span><span class="pill p-pa">⏸ Paused at 12%</span><div class="mini pa"><i style="width:12%"></i></div></span><span class="acts"><span class="ico grn">▶</span><span class="ico red">🗑</span></span></div>
+  <div class="ep"><span class="n">E06–10</span><span class="m">5 episodes</span><span class="pill p-q">Queued in pack</span><span class="acts"><span class="ico">⇡</span><span class="ico amb">⏸</span><span class="ico red">🗑</span></span></div>
+ </div>
+
+ <div class="season">
+  <div class="row" style="justify-content:space-between">
+   <div class="dim" style="opacity:.6"><b style="font-size:13px">▸ Season 2</b> <span class="pill p-de">🗑 Deleted · 0/10</span> <span class="m">· deleted today 19:46</span></div>
+   <div class="acts"><span class="ico grn">↻ Restore</span></div>
+  </div>
+ </div>
+
+ <div class="modal">
+  <b>Delete Season 1 · E04?</b>
+  <div class="m" style="margin:4px 0 8px">Stops the download and removes 2.8 GB already on disk. You can restore it later; it will download again.</div>
+  <span class="btn">Keep</span> <span class="btn red" style="background:#7f1d1d;color:#fff">Delete</span>
+ </div>
+</div>
+</div>

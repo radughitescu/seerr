@@ -117,3 +117,163 @@ describe('SonarrAPI getSeriesByTvdbId', () => {
     });
   });
 });
+
+describe('SonarrAPI request controls', () => {
+  afterEach(() => mock.restoreAll());
+
+  it('setEpisodesMonitored(false) PUTs /episode/monitor with monitored false', async () => {
+    const sonarr = buildSonarr();
+    const put = mock.method(getAxios(sonarr), 'put', async () => ({}));
+
+    await sonarr.setEpisodesMonitored([1, 2], false);
+
+    assert.deepStrictEqual(put.mock.calls[0].arguments, [
+      '/episode/monitor',
+      { episodeIds: [1, 2], monitored: false },
+    ]);
+  });
+
+  it('monitorEpisodes PUTs monitored true', async () => {
+    const sonarr = buildSonarr();
+    const put = mock.method(getAxios(sonarr), 'put', async () => ({}));
+
+    await sonarr.monitorEpisodes([3]);
+
+    assert.deepStrictEqual(put.mock.calls[0].arguments, [
+      '/episode/monitor',
+      { episodeIds: [3], monitored: true },
+    ]);
+  });
+
+  it('setSeasonMonitored flips only the given season', async () => {
+    const sonarr = buildSonarr();
+    const series = {
+      id: 5,
+      seasons: [
+        { seasonNumber: 1, monitored: true },
+        { seasonNumber: 2, monitored: true },
+      ],
+    };
+    const get = mock.method(getAxios(sonarr), 'get', async () => ({
+      data: series,
+    }));
+    const put = mock.method(getAxios(sonarr), 'put', async () => ({}));
+
+    await sonarr.setSeasonMonitored(5, 2, false);
+
+    assert.strictEqual(get.mock.calls[0].arguments[0], '/series/5');
+    assert.strictEqual(put.mock.calls[0].arguments[0], '/series/5');
+    assert.deepStrictEqual(put.mock.calls[0].arguments[1], {
+      id: 5,
+      seasons: [
+        { seasonNumber: 1, monitored: true },
+        { seasonNumber: 2, monitored: false },
+      ],
+    });
+  });
+
+  it('searchEpisodes POSTs an EpisodeSearch command', async () => {
+    const sonarr = buildSonarr();
+    const post = mock.method(getAxios(sonarr), 'post', async () => ({}));
+
+    await sonarr.searchEpisodes([7, 8]);
+
+    assert.deepStrictEqual(post.mock.calls[0].arguments, [
+      '/command',
+      { name: 'EpisodeSearch', episodeIds: [7, 8] },
+    ]);
+  });
+
+  it('searchSeason POSTs a SeasonSearch command', async () => {
+    const sonarr = buildSonarr();
+    const post = mock.method(getAxios(sonarr), 'post', async () => ({}));
+
+    await sonarr.searchSeason(5, 2);
+
+    assert.deepStrictEqual(post.mock.calls[0].arguments, [
+      '/command',
+      { name: 'SeasonSearch', seriesId: 5, seasonNumber: 2 },
+    ]);
+  });
+
+  it('getEpisodeFiles GETs /episodefile for the series', async () => {
+    const sonarr = buildSonarr();
+    const files = [{ id: 1 }];
+    const get = mock.method(getAxios(sonarr), 'get', async () => ({
+      data: files,
+    }));
+
+    const result = await sonarr.getEpisodeFiles(5);
+
+    assert.deepStrictEqual(get.mock.calls[0].arguments, [
+      '/episodefile',
+      { params: { seriesId: 5 } },
+    ]);
+    assert.deepStrictEqual(result, files);
+  });
+
+  it('deleteEpisodeFiles DELETEs /episodefile/bulk with ids', async () => {
+    const sonarr = buildSonarr();
+    const del = mock.method(getAxios(sonarr), 'delete', async () => ({}));
+
+    await sonarr.deleteEpisodeFiles([4, 5]);
+
+    assert.deepStrictEqual(del.mock.calls[0].arguments, [
+      '/episodefile/bulk',
+      { data: { episodeFileIds: [4, 5] } },
+    ]);
+  });
+
+  it('getQueueFor requests the series queue with episodes', async () => {
+    const sonarr = buildSonarr();
+    const get = mock.method(getAxios(sonarr), 'get', async () => ({
+      data: { records: [{ id: 1 }] },
+    }));
+
+    const result = await sonarr.getQueueFor({ seriesId: 5 });
+
+    assert.deepStrictEqual(get.mock.calls[0].arguments, [
+      '/queue',
+      {
+        params: {
+          seriesIds: [5],
+          includeEpisode: true,
+          pageSize: 1000,
+        },
+        paramsSerializer: { indexes: null },
+      },
+    ]);
+    assert.deepStrictEqual(result, [{ id: 1 }]);
+  });
+
+  it('removeQueueItems DELETEs /queue/bulk with removeFromClient, blocklist=false, skipRedownload=true', async () => {
+    const sonarr = buildSonarr();
+    const del = mock.method(getAxios(sonarr), 'delete', async () => ({}));
+
+    await sonarr.removeQueueItems([1, 2], true);
+
+    assert.deepStrictEqual(del.mock.calls[0].arguments, [
+      '/queue/bulk',
+      {
+        data: { ids: [1, 2] },
+        params: {
+          removeFromClient: true,
+          blocklist: false,
+          skipRedownload: true,
+        },
+      },
+    ]);
+  });
+
+  it('getCommands GETs /command', async () => {
+    const sonarr = buildSonarr();
+    const get = mock.method(getAxios(sonarr), 'get', async () => ({
+      data: [{ id: 1 }],
+    }));
+
+    const result = await sonarr.getCommands();
+
+    assert.strictEqual(get.mock.calls[0].arguments[0], '/command');
+    assert.deepStrictEqual(result, [{ id: 1 }]);
+  });
+});

@@ -30,6 +30,7 @@ export interface RadarrMovie {
   added: string;
   hasFile: boolean;
   tags: number[];
+  lastSearchTime?: string;
   movieFile?: {
     id: number;
     movieId: number;
@@ -62,6 +63,14 @@ export interface RadarrMovie {
     originalFilePath?: string;
     qualityCutoffNotMet: boolean;
   };
+}
+
+export interface MovieFile {
+  id: number;
+  movieId: number;
+  relativePath: string;
+  path: string;
+  size: number;
 }
 
 class RadarrAPI extends ServarrBase<{ movieId: number }> {
@@ -286,6 +295,53 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
       );
     }
   }
+  public async setMovieMonitored(
+    movieId: number,
+    monitored: boolean
+  ): Promise<void> {
+    try {
+      const movie = await this.getMovie({ id: movieId });
+      await this.axios.put(`/movie/${movieId}`, { ...movie, monitored });
+    } catch (e) {
+      logger.error('Failed to set movie monitored', {
+        label: 'Radarr API',
+        errorMessage: e.message,
+        movieId,
+        monitored,
+      });
+      throw new Error('Failed to set movie monitored', { cause: e });
+    }
+  }
+
+  public async getMovieFiles(movieId: number): Promise<MovieFile[]> {
+    try {
+      const response = await this.axios.get<MovieFile[]>('/moviefile', {
+        params: { movieId },
+      });
+      return response.data;
+    } catch (e) {
+      logger.error('Failed to retrieve movie files', {
+        label: 'Radarr API',
+        errorMessage: e.message,
+        movieId,
+      });
+      throw new Error('Failed to get movie files', { cause: e });
+    }
+  }
+
+  public async deleteMovieFile(id: number): Promise<void> {
+    try {
+      await this.axios.delete(`/moviefile/${id}`);
+    } catch (e) {
+      logger.error('Failed to delete movie file', {
+        label: 'Radarr API',
+        errorMessage: e.message,
+        id,
+      });
+      throw new Error('Failed to delete movie file', { cause: e });
+    }
+  }
+
   public removeMovie = async (tmdbId: number): Promise<void> => {
     const { id, title } = await this.getMovieByTmdbId(tmdbId);
 

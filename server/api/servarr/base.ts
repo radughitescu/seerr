@@ -64,6 +64,38 @@ interface QueueItem {
   id: number;
 }
 
+export interface QueueRecord {
+  id: number;
+  downloadId: string;
+  episodeId?: number;
+  movieId?: number;
+  seasonNumber?: number;
+  trackedDownloadState: string;
+  trackedDownloadStatus: string;
+  statusMessages: { title: string; messages: string[] }[];
+  errorMessage?: string;
+  size: number;
+  sizeleft: number;
+}
+
+export interface CommandResource {
+  id: number;
+  name: string;
+  status:
+    | 'queued'
+    | 'started'
+    | 'completed'
+    | 'failed'
+    | 'aborted'
+    | 'cancelled';
+  body: {
+    episodeIds?: number[];
+    seriesId?: number;
+    seasonNumber?: number;
+    movieIds?: number[];
+  };
+}
+
 export interface Tag {
   id: number;
   label: string;
@@ -176,6 +208,69 @@ class ServarrBase<QueueItemAppendT> extends ExternalAPI {
     } catch (e) {
       throw new Error(
         `[${this.apiName}] Failed to retrieve queue: ${e.message}`,
+        { cause: e }
+      );
+    }
+  };
+
+  public getQueueFor = async (params: {
+    seriesId?: number;
+    movieId?: number;
+  }): Promise<QueueRecord[]> => {
+    try {
+      const response = await this.axios.get<{ records: QueueRecord[] }>(
+        `/queue`,
+        {
+          params: {
+            ...(params.seriesId !== undefined && {
+              seriesIds: [params.seriesId],
+            }),
+            ...(params.movieId !== undefined && { movieIds: [params.movieId] }),
+            includeEpisode: true,
+            pageSize: 1000,
+          },
+          paramsSerializer: { indexes: null },
+        }
+      );
+
+      return response.data.records;
+    } catch (e) {
+      throw new Error(
+        `[${this.apiName}] Failed to retrieve queue: ${e.message}`,
+        { cause: e }
+      );
+    }
+  };
+
+  public removeQueueItems = async (
+    ids: number[],
+    removeFromClient: boolean
+  ): Promise<void> => {
+    try {
+      await this.axios.delete(`/queue/bulk`, {
+        data: { ids },
+        params: {
+          removeFromClient,
+          blocklist: false,
+          skipRedownload: true,
+        },
+      });
+    } catch (e) {
+      throw new Error(
+        `[${this.apiName}] Failed to remove queue items: ${e.message}`,
+        { cause: e }
+      );
+    }
+  };
+
+  public getCommands = async (): Promise<CommandResource[]> => {
+    try {
+      const response = await this.axios.get<CommandResource[]>(`/command`);
+
+      return response.data;
+    } catch (e) {
+      throw new Error(
+        `[${this.apiName}] Failed to retrieve commands: ${e.message}`,
         { cause: e }
       );
     }

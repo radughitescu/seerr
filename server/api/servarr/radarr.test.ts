@@ -117,3 +117,65 @@ describe('RadarrAPI getMovieByTmdbId', () => {
     });
   });
 });
+
+describe('RadarrAPI request controls', () => {
+  afterEach(() => mock.restoreAll());
+
+  it('setMovieMonitored PUTs the full movie with monitored flipped', async () => {
+    const radarr = buildRadarr();
+    const movie = { id: 7, title: 'T', monitored: true };
+    const get = mock.method(getAxios(radarr), 'get', async () => ({
+      data: movie,
+    }));
+    const put = mock.method(getAxios(radarr), 'put', async () => ({}));
+
+    await radarr.setMovieMonitored(7, false);
+
+    assert.strictEqual(get.mock.calls[0].arguments[0], '/movie/7');
+    assert.deepStrictEqual(put.mock.calls[0].arguments, [
+      '/movie/7',
+      { id: 7, title: 'T', monitored: false },
+    ]);
+  });
+
+  it('getMovieFiles GETs /moviefile for the movie', async () => {
+    const radarr = buildRadarr();
+    const get = mock.method(getAxios(radarr), 'get', async () => ({
+      data: [{ id: 3 }],
+    }));
+
+    const result = await radarr.getMovieFiles(7);
+
+    assert.deepStrictEqual(get.mock.calls[0].arguments, [
+      '/moviefile',
+      { params: { movieId: 7 } },
+    ]);
+    assert.deepStrictEqual(result, [{ id: 3 }]);
+  });
+
+  it('deleteMovieFile DELETEs /moviefile/{id}', async () => {
+    const radarr = buildRadarr();
+    const del = mock.method(getAxios(radarr), 'delete', async () => ({}));
+
+    await radarr.deleteMovieFile(3);
+
+    assert.strictEqual(del.mock.calls[0].arguments[0], '/moviefile/3');
+  });
+
+  it('getQueueFor requests the movie queue', async () => {
+    const radarr = buildRadarr();
+    const get = mock.method(getAxios(radarr), 'get', async () => ({
+      data: { records: [] },
+    }));
+
+    await radarr.getQueueFor({ movieId: 7 });
+
+    assert.deepStrictEqual(get.mock.calls[0].arguments, [
+      '/queue',
+      {
+        params: { movieIds: [7], includeEpisode: true, pageSize: 1000 },
+        paramsSerializer: { indexes: null },
+      },
+    ]);
+  });
+});

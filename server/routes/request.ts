@@ -22,6 +22,8 @@ import type {
   RequestResultsResponse,
 } from '@server/interfaces/api/requestInterfaces';
 import { Permission } from '@server/lib/permissions';
+import { ActionError, ServiceError } from '@server/lib/requestControls/actions';
+import { reRequestControlled } from '@server/lib/requestControls/rerequest';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
@@ -309,7 +311,9 @@ requestRoutes.get<Record<string, unknown>, RequestResultsResponse>(
   }
 );
 
-requestRoutes.post<never, MediaRequest, MediaRequestBody>(
+type CreateResponse = MediaRequest | { service: string; message: string };
+
+requestRoutes.post<never, CreateResponse, MediaRequestBody>(
   '/',
   async (req, res, next) => {
     try {
@@ -319,12 +323,41 @@ requestRoutes.post<never, MediaRequest, MediaRequestBody>(
           message: 'You must be logged in to request media.',
         });
       }
+      const converted = await reRequestControlled(req.body, req.user);
+      if (converted) {
+        if (converted.remainingSeasons.length > 0) {
+          try {
+            await MediaRequest.request(
+              { ...req.body, seasons: converted.remainingSeasons },
+              req.user
+            );
+          } catch (error) {
+            if (
+              !(error instanceof NoSeasonsAvailableError) &&
+              !(error instanceof DuplicateMediaRequestError)
+            ) {
+              throw error;
+            }
+          }
+        }
+        return res.status(201).json(converted.request);
+      }
+
       const request = await MediaRequest.request(req.body, req.user);
 
       return res.status(201).json(request);
     } catch (error) {
       if (!(error instanceof Error)) {
         return;
+      }
+
+      if (error instanceof ServiceError) {
+        return res
+          .status(502)
+          .json({ service: error.service, message: error.message });
+      }
+      if (error instanceof ActionError) {
+        return next({ status: error.status, message: error.message });
       }
 
       switch (error.constructor) {

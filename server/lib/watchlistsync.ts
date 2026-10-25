@@ -1,4 +1,5 @@
 import PlexTvAPI from '@server/api/plextv';
+import TheMovieDb from '@server/api/themoviedb';
 import { MediaStatus, MediaType } from '@server/constants/media';
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
@@ -11,6 +12,7 @@ import {
   RequestPermissionError,
 } from '@server/entity/MediaRequest';
 import { User } from '@server/entity/User';
+import { isBlocked, mediaHasControls } from '@server/lib/requestControls/store';
 import logger from '@server/logger';
 import { Permission } from './permissions';
 
@@ -141,12 +143,22 @@ class WatchlistSync {
           continue;
         }
 
+        const seasons = await this.seasonsToRequest(mediaItem, mediaItems);
+        if (seasons === null) {
+          logger.debug('Skipping paused or deleted watchlist item', {
+            label: 'Watchlist Sync',
+            userId: user.id,
+            mediaTitle: mediaItem.title,
+          });
+          continue;
+        }
+
         await MediaRequest.request(
           {
             mediaId: mediaItem.tmdbId,
             mediaType:
               mediaItem.type === 'show' ? MediaType.TV : MediaType.MOVIE,
-            seasons: mediaItem.type === 'show' ? 'all' : undefined,
+            seasons,
             tvdbId: mediaItem.tvdbId,
             is4k: false,
           },
@@ -193,6 +205,42 @@ class WatchlistSync {
         }
       }
     }
+  }
+
+  private async seasonsToRequest(
+    item: { tmdbId: number; type: string },
+    mediaItems: Media[]
+  ): Promise<number[] | 'all' | undefined | null> {
+    const mediaType = item.type === 'show' ? MediaType.TV : MediaType.MOVIE;
+    const media = mediaItems.find(
+      (m) => m.tmdbId === item.tmdbId && m.mediaType === mediaType
+    );
+
+    if (mediaType === MediaType.MOVIE) {
+      return media && (await isBlocked(media.id)) ? null : undefined;
+    }
+
+    if (!media || !(await mediaHasControls(media.id))) {
+      return 'all';
+    }
+
+    const show = await new TheMovieDb().getTvShow({ tvId: item.tmdbId });
+    const candidates = show.seasons
+      .filter(
+        (season) => season.season_number !== 0 && season.episode_count > 0
+      )
+      .map((season) => season.season_number);
+    const open: number[] = [];
+    for (const seasonNumber of candidates) {
+      if (!(await isBlocked(media.id, seasonNumber))) {
+        open.push(seasonNumber);
+      }
+    }
+
+    if (open.length === 0) {
+      return null;
+    }
+    return open.length === candidates.length ? 'all' : open;
   }
 }
 

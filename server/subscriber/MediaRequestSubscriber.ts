@@ -2,6 +2,7 @@ import type { RadarrMovieOptions } from '@server/api/servarr/radarr';
 import RadarrAPI from '@server/api/servarr/radarr';
 import type {
   AddSeriesOptions,
+  EpisodeResult,
   SonarrSeries,
 } from '@server/api/servarr/sonarr';
 import SonarrAPI from '@server/api/servarr/sonarr';
@@ -15,9 +16,11 @@ import {
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import { MediaRequest } from '@server/entity/MediaRequest';
+import type { RequestItemControl } from '@server/entity/RequestItemControl';
 import Season from '@server/entity/Season';
 import SeasonRequest from '@server/entity/SeasonRequest';
 import notificationManager, { Notification } from '@server/lib/notifications';
+import { effectiveState, getControls } from '@server/lib/requestControls/store';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { withNestedTransaction } from '@server/utils/nestedTransaction';
@@ -190,6 +193,17 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
       entity.type === MediaType.MOVIE
     ) {
       try {
+        const controls = await getControls(entity.id, manager);
+        const held = effectiveState(controls, null, null);
+        if (held !== null) {
+          logger.info(`Movie request is ${held}, not sending to Radarr`, {
+            label: 'Media Request',
+            requestId: entity.id,
+            mediaId: entity.media.id,
+          });
+          return;
+        }
+
         const mediaRepository = manager.getRepository(Media);
         const settings = getSettings();
         if (settings.radarr.length === 0 && !settings.radarr[0]) {
@@ -489,6 +503,35 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
       entity.type === MediaType.TV
     ) {
       try {
+        const controls = await getControls(entity.id, manager);
+        const requestedSeasons = (entity.seasons ?? []).map(
+          (season) => season.seasonNumber
+        );
+        const seasonsToSend = requestedSeasons.filter(
+          (seasonNumber) =>
+            effectiveState(controls, seasonNumber, null) === null
+        );
+        const heldEpisodes = controls.some(
+          (control) =>
+            control.episodeNumber !== null &&
+            control.seasonNumber !== null &&
+            seasonsToSend.includes(control.seasonNumber)
+        );
+        const guarded =
+          seasonsToSend.length < requestedSeasons.length || heldEpisodes;
+
+        if (controls.length > 0 && seasonsToSend.length === 0) {
+          logger.info(
+            'Every requested season is paused or deleted, not sending to Sonarr',
+            {
+              label: 'Media Request',
+              requestId: entity.id,
+              mediaId: entity.media.id,
+            }
+          );
+          return;
+        }
+
         const mediaRepository = manager.getRepository(Media);
         const settings = getSettings();
         if (settings.sonarr.length === 0 && !settings.sonarr[0]) {
@@ -716,13 +759,15 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           rootFolderPath: rootFolder,
           title: series.name,
           tvdbid: tvdbId,
-          seasons: entity.seasons.map((season) => season.seasonNumber),
+          seasons: guarded
+            ? seasonsToSend
+            : entity.seasons.map((season) => season.seasonNumber),
           seasonFolder: sonarrSettings.enableSeasonFolders,
           seriesType,
           tags,
           monitored: true,
           monitorNewItems: sonarrSettings.monitorNewItems,
-          searchNow: !sonarrSettings.preventSearch,
+          searchNow: !sonarrSettings.preventSearch && !guarded,
         };
 
         // Run entity asynchronously so we don't wait for it on the UI side
@@ -748,6 +793,17 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
             media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
               sonarrSettings?.id;
             await mediaRepository.save(media);
+
+            if (guarded && sonarrSeries.id) {
+              await this.holdControlledEpisodes(
+                sonarr,
+                sonarrSeries.id,
+                controls,
+                seasonsToSend,
+                !sonarrSettings?.preventSearch,
+                entity.id
+              );
+            }
           })
           .catch(async () => {
             try {
@@ -826,6 +882,62 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           );
         }
       }
+    }
+  }
+
+  private async holdControlledEpisodes(
+    sonarr: SonarrAPI,
+    seriesId: number,
+    controls: RequestItemControl[],
+    seasons: number[],
+    search: boolean,
+    requestId: number
+  ): Promise<void> {
+    try {
+      const episodes = await sonarr.getEpisodes(seriesId);
+      const held = (episode: EpisodeResult) =>
+        effectiveState(
+          controls,
+          episode.seasonNumber,
+          episode.episodeNumber
+        ) !== null;
+
+      const unmonitor = episodes
+        .filter(
+          (episode) =>
+            held(episode) &&
+            (episode.monitored || seasons.includes(episode.seasonNumber))
+        )
+        .map((episode) => episode.id);
+      if (unmonitor.length > 0) {
+        await sonarr.setEpisodesMonitored(unmonitor, false);
+      }
+
+      if (!search) {
+        return;
+      }
+
+      const now = Date.now();
+      const missing = episodes
+        .filter(
+          (episode) =>
+            seasons.includes(episode.seasonNumber) &&
+            !held(episode) &&
+            !episode.hasFile &&
+            !!episode.airDateUtc &&
+            Date.parse(episode.airDateUtc) <= now
+        )
+        .map((episode) => episode.id);
+      if (missing.length > 0) {
+        await sonarr.searchEpisodes(missing);
+      }
+    } catch (e) {
+      logger.error('Failed to hold paused or deleted episodes in Sonarr', {
+        label: 'Media Request',
+        requestId,
+        seriesId,
+        errorMessage: e instanceof Error ? e.message : String(e),
+      });
     }
   }
 

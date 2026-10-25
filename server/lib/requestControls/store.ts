@@ -18,9 +18,13 @@ const matchOrNull = (value: number | null) =>
   value === null ? IsNull() : value;
 
 export async function getControls(
-  requestId: number
+  requestId: number,
+  manager?: EntityManager
 ): Promise<RequestItemControl[]> {
-  return getRepository(RequestItemControl).find({
+  const repo = manager
+    ? manager.getRepository(RequestItemControl)
+    : getRepository(RequestItemControl);
+  return repo.find({
     where: { request: { id: requestId } },
     order: { id: 'ASC' },
   });
@@ -214,4 +218,11 @@ export async function isBlocked(
     }
   }
   return false;
+}
+
+export async function mediaHasControls(mediaId: number): Promise<boolean> {
+  const count = await getRepository(RequestItemControl).count({
+    where: { request: { media: { id: mediaId }, is4k: false } },
+  });
+  return count > 0;
 }

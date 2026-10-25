@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { before, beforeEach, describe, it, mock } from 'node:test';
 
+import type { AddSeriesOptions } from '@server/api/servarr/sonarr';
+import SonarrAPI from '@server/api/servarr/sonarr';
 import TheMovieDb from '@server/api/themoviedb';
 import type {
   TmdbMovieDetails,
@@ -18,7 +20,10 @@ import OverrideRule from '@server/entity/OverrideRule';
 import Season from '@server/entity/Season';
 import SeasonRequest from '@server/entity/SeasonRequest';
 import { User } from '@server/entity/User';
+import type { RequestLiveState } from '@server/lib/liveStatus/types';
 import { Permission } from '@server/lib/permissions';
+import { ServiceError, actions } from '@server/lib/requestControls/actions';
+import { setControl } from '@server/lib/requestControls/store';
 import type { RadarrSettings, SonarrSettings } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import { checkUser } from '@server/middleware/auth';
@@ -1626,5 +1631,266 @@ describe('DELETE /request/:requestId, orphaned season status reset', () => {
     const updated = await mediaRepo.findOneOrFail({ where: { id: media.id } });
     assert.strictEqual(updated.seasons[0].status, MediaStatus.UNKNOWN);
     assert.strictEqual(updated.seasons[0].status4k, MediaStatus.PROCESSING);
+  });
+});
+
+describe('POST /request for paused or deleted items', () => {
+  async function seedControlled(options: {
+    tmdbId: number;
+    mediaType: MediaType;
+    status: MediaRequestStatus;
+    seasons?: number[];
+  }) {
+    const requestedBy = await getRepository(User).findOneOrFail({
+      where: { email: 'demo@seerr.dev' },
+    });
+    const media = await getRepository(Media).save(
+      new Media({
+        mediaType: options.mediaType,
+        tmdbId: options.tmdbId,
+        tvdbId:
+          options.mediaType === MediaType.TV ? options.tmdbId + 1 : undefined,
+        status: MediaStatus.DELETED,
+        status4k: MediaStatus.UNKNOWN,
+      })
+    );
+    const created = await getRepository(MediaRequest).save(
+      new MediaRequest({
+        type: options.mediaType,
+        status: options.status,
+        media,
+        requestedBy,
+        is4k: false,
+        seasons: (options.seasons ?? []).map(
+          (seasonNumber) =>
+            new SeasonRequest({ seasonNumber, status: options.status })
+        ),
+      })
+    );
+    return { request: created, user: requestedBy };
+  }
+
+  const stubSend = (t: { mock: typeof mock }) => {
+    t.mock.method(
+      MediaRequestSubscriber.prototype,
+      'sendToRadarr',
+      async () => undefined
+    );
+    t.mock.method(
+      MediaRequestSubscriber.prototype,
+      'sendToSonarr',
+      async () => undefined
+    );
+  };
+
+  const stubRunAction = (t: { mock: typeof mock }) => {
+    const impl: typeof actions.runAction = async () =>
+      ({}) as unknown as RequestLiveState;
+    return t.mock.method(actions, 'runAction', impl);
+  };
+
+  it('POST /request on a deleted season restores the existing request instead of creating a new one', async (t) => {
+    stubSend(t);
+    const runAction = stubRunAction(t);
+    const { request: existing, user } = await seedControlled({
+      tmdbId: 77001,
+      mediaType: MediaType.TV,
+      status: MediaRequestStatus.COMPLETED,
+      seasons: [1, 2],
+    });
+    await setControl(
+      { requestId: existing.id, seasonNumber: 2, episodeNumber: null },
+      'deleted',
+      user.id
+    );
+    const before = await getRepository(MediaRequest).count();
+
+    const agent = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.TV,
+      mediaId: 77001,
+      seasons: [2],
+    });
+
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(res.body.id, existing.id);
+    assert.strictEqual(await getRepository(MediaRequest).count(), before);
+    assert.strictEqual(runAction.mock.callCount(), 1);
+    const [call] = runAction.mock.calls[0].arguments;
+    assert.strictEqual(call.action, 'restore');
+    assert.strictEqual(call.request.id, existing.id);
+    assert.strictEqual(call.seasonNumber, 2);
+    assert.strictEqual(call.episodeNumber, null);
+    assert.strictEqual(call.user.id, user.id);
+  });
+
+  it('POST /request for a paused movie resumes the existing request', async (t) => {
+    stubSend(t);
+    const runAction = stubRunAction(t);
+    const { request: existing, user } = await seedControlled({
+      tmdbId: 77002,
+      mediaType: MediaType.MOVIE,
+      status: MediaRequestStatus.APPROVED,
+    });
+    await setControl(
+      { requestId: existing.id, seasonNumber: null, episodeNumber: null },
+      'paused',
+      user.id
+    );
+    const before = await getRepository(MediaRequest).count();
+
+    const agent = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.MOVIE,
+      mediaId: 77002,
+    });
+
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(res.body.id, existing.id);
+    assert.strictEqual(await getRepository(MediaRequest).count(), before);
+    assert.strictEqual(runAction.mock.callCount(), 1);
+    const [call] = runAction.mock.calls[0].arguments;
+    assert.strictEqual(call.action, 'resume');
+    assert.strictEqual(call.seasonNumber, null);
+    assert.strictEqual(call.episodeNumber, null);
+  });
+
+  it('restores the covered season and requests the uncovered one as upstream', async (t) => {
+    stubSend(t);
+    const runAction = stubRunAction(t);
+    const { request: existing, user } = await seedControlled({
+      tmdbId: 77003,
+      mediaType: MediaType.TV,
+      status: MediaRequestStatus.COMPLETED,
+      seasons: [1],
+    });
+    await setControl(
+      { requestId: existing.id, seasonNumber: 1, episodeNumber: null },
+      'deleted',
+      user.id
+    );
+    const before = await getRepository(MediaRequest).count();
+
+    const agent = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.TV,
+      mediaId: 77003,
+      seasons: [1, 2],
+    });
+
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(res.body.id, existing.id);
+    assert.deepStrictEqual(
+      runAction.mock.calls.map(({ arguments: [c] }) => [
+        c.action,
+        c.seasonNumber,
+      ]),
+      [['restore', 1]]
+    );
+    assert.strictEqual(await getRepository(MediaRequest).count(), before + 1);
+    const created = await getRepository(MediaRequest).findOneOrFail({
+      where: { media: { tmdbId: 77003 } },
+      order: { id: 'DESC' },
+    });
+    assert.notStrictEqual(created.id, existing.id);
+    assert.deepStrictEqual(
+      created.seasons.map((s) => s.seasonNumber),
+      [2]
+    );
+  });
+
+  it('creates a new request as upstream when no existing request is controlled', async (t) => {
+    stubSend(t);
+    const runAction = stubRunAction(t);
+    await seedControlled({
+      tmdbId: 77004,
+      mediaType: MediaType.TV,
+      status: MediaRequestStatus.COMPLETED,
+      seasons: [1],
+    });
+    const before = await getRepository(MediaRequest).count();
+
+    const agent = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.TV,
+      mediaId: 77004,
+      seasons: [1],
+    });
+
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(runAction.mock.callCount(), 0);
+    assert.strictEqual(await getRepository(MediaRequest).count(), before + 1);
+  });
+
+  it('returns 502 naming the service when the restore fails', async (t) => {
+    stubSend(t);
+    t.mock.method(actions, 'runAction', async () => {
+      throw new ServiceError('sonarr', 'Sonarr is unreachable.');
+    });
+    const { request: existing, user } = await seedControlled({
+      tmdbId: 77005,
+      mediaType: MediaType.TV,
+      status: MediaRequestStatus.COMPLETED,
+      seasons: [1],
+    });
+    await setControl(
+      { requestId: existing.id, seasonNumber: 1, episodeNumber: null },
+      'deleted',
+      user.id
+    );
+    const before = await getRepository(MediaRequest).count();
+
+    const agent = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.TV,
+      mediaId: 77005,
+      seasons: [1],
+    });
+
+    assert.strictEqual(res.status, 502);
+    assert.deepStrictEqual(res.body, {
+      service: 'sonarr',
+      message: 'Sonarr is unreachable.',
+    });
+    assert.strictEqual(await getRepository(MediaRequest).count(), before);
+  });
+
+  it('retry of a request with a deleted season does not re-send it', async (t) => {
+    configureSonarr([{}]);
+    const sent: { seasons: number[]; searchNow?: boolean }[] = [];
+    t.mock.method(
+      SonarrAPI.prototype,
+      'addSeries',
+      async (options: AddSeriesOptions) => {
+        sent.push(options);
+        return { id: 7, titleSlug: 'show' } as Awaited<
+          ReturnType<SonarrAPI['addSeries']>
+        >;
+      }
+    );
+    t.mock.method(SonarrAPI.prototype, 'getEpisodes', async () => []);
+    const { request: failed, user } = await seedControlled({
+      tmdbId: 77006,
+      mediaType: MediaType.TV,
+      status: MediaRequestStatus.FAILED,
+      seasons: [1, 2],
+    });
+    await setControl(
+      { requestId: failed.id, seasonNumber: 2, episodeNumber: null },
+      'deleted',
+      user.id
+    );
+
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+    const res = await admin.post(`/request/${failed.id}/retry`);
+    assert.strictEqual(res.status, 200);
+    for (let i = 0; i < 50 && sent.length === 0; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.deepStrictEqual(
+      sent.map((o) => [o.seasons, o.searchNow]),
+      [[[1], false]]
+    );
   });
 });

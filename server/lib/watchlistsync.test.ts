@@ -1,5 +1,7 @@
 import type { PlexWatchlistItem } from '@server/api/plextv';
 import PlexTvAPI from '@server/api/plextv';
+import TheMovieDb from '@server/api/themoviedb';
+import type { TmdbTvDetails } from '@server/api/themoviedb/interfaces';
 import {
   MediaRequestStatus,
   MediaStatus,
@@ -8,9 +10,11 @@ import {
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import { MediaRequest } from '@server/entity/MediaRequest';
+import SeasonRequest from '@server/entity/SeasonRequest';
 import { User } from '@server/entity/User';
 import { UserSettings } from '@server/entity/UserSettings';
 import { Permission } from '@server/lib/permissions';
+import { setControl } from '@server/lib/requestControls/store';
 import watchlistSync from '@server/lib/watchlistsync';
 import { setupTestDb } from '@server/test/db';
 import assert from 'node:assert/strict';
@@ -31,14 +35,41 @@ Object.defineProperty(PlexTvAPI.prototype, 'getWatchlist', {
   configurable: true,
 });
 
-let requestCalls: { mediaId: number; mediaType: MediaType }[] = [];
+let requestCalls: {
+  mediaId: number;
+  mediaType: MediaType;
+  seasons?: number[] | 'all';
+}[] = [];
 
 Object.defineProperty(MediaRequest, 'request', {
-  value: async (body: { mediaId: number; mediaType: MediaType }) => {
-    requestCalls.push({ mediaId: body.mediaId, mediaType: body.mediaType });
+  value: async (body: {
+    mediaId: number;
+    mediaType: MediaType;
+    seasons?: number[] | 'all';
+  }) => {
+    requestCalls.push({
+      mediaId: body.mediaId,
+      mediaType: body.mediaType,
+      seasons: body.seasons,
+    });
     return {} as MediaRequest;
   },
   writable: true,
+  configurable: true,
+});
+
+Object.defineProperty(TheMovieDb.prototype, 'getTvShow', {
+  get() {
+    return async ({ tvId }: { tvId: number }) =>
+      ({
+        id: tvId,
+        seasons: [0, 1, 2, 3].map((season_number) => ({
+          season_number,
+          episode_count: season_number === 3 ? 0 : 10,
+        })),
+      }) as unknown as TmdbTvDetails;
+  },
+  set() {},
   configurable: true,
 });
 
@@ -193,6 +224,118 @@ describe('WatchlistSync re-request gating', () => {
       calls.length,
       1,
       'DELETED movie should be re-requested even when a stale auto-request exists'
+    );
+  });
+});
+
+async function seedControlledRequest(
+  user: User,
+  tmdbId: number,
+  mediaType: MediaType,
+  seasons: number[] = []
+): Promise<MediaRequest> {
+  const media = await getRepository(Media).findOneOrFail({
+    where: { tmdbId, mediaType },
+  });
+  return getRepository(MediaRequest).save(
+    new MediaRequest({
+      type: mediaType,
+      status: MediaRequestStatus.COMPLETED,
+      media,
+      requestedBy: user,
+      is4k: false,
+      seasons: seasons.map(
+        (seasonNumber) =>
+          new SeasonRequest({
+            seasonNumber,
+            status: MediaRequestStatus.COMPLETED,
+          })
+      ),
+    })
+  );
+}
+
+describe('WatchlistSync paused and deleted items', () => {
+  beforeEach(() => {
+    requestCalls = [];
+    watchlistItems = [];
+  });
+
+  it('watchlist sync does not request a deleted movie', async () => {
+    const user = await configureSyncUser();
+    await seedMedia(300, MediaType.MOVIE, MediaStatus.DELETED);
+    const request = await seedControlledRequest(user, 300, MediaType.MOVIE);
+    await setControl(
+      { requestId: request.id, seasonNumber: null, episodeNumber: null },
+      'deleted',
+      user.id
+    );
+    await seedMedia(301, MediaType.MOVIE, MediaStatus.DELETED);
+
+    watchlistItems = [
+      movieItem(300, 'Deleted Movie'),
+      movieItem(301, 'Plain Deleted Movie'),
+    ];
+
+    await watchlistSync.syncWatchlist();
+
+    assert.deepStrictEqual(
+      requestCalls.map((c) => c.mediaId),
+      [301]
+    );
+  });
+
+  it('skips a show whose every season is blocked', async () => {
+    const user = await configureSyncUser();
+    await seedMedia(400, MediaType.TV, MediaStatus.DELETED);
+    const request = await seedControlledRequest(
+      user,
+      400,
+      MediaType.TV,
+      [1, 2]
+    );
+    await setControl(
+      { requestId: request.id, seasonNumber: 1, episodeNumber: null },
+      'deleted',
+      user.id
+    );
+    await setControl(
+      { requestId: request.id, seasonNumber: 2, episodeNumber: null },
+      'paused',
+      user.id
+    );
+
+    watchlistItems = [showItem(400, 'Blocked Show')];
+
+    await watchlistSync.syncWatchlist();
+
+    assert.deepStrictEqual(requestCalls, []);
+  });
+
+  it('requests only the seasons of a show that are not blocked', async () => {
+    const user = await configureSyncUser();
+    await seedMedia(401, MediaType.TV, MediaStatus.DELETED);
+    const request = await seedControlledRequest(user, 401, MediaType.TV, [1]);
+    await setControl(
+      { requestId: request.id, seasonNumber: 1, episodeNumber: null },
+      'deleted',
+      user.id
+    );
+    await seedMedia(402, MediaType.TV, MediaStatus.DELETED);
+
+    watchlistItems = [
+      showItem(401, 'Partly Deleted Show'),
+      showItem(402, 'Plain Show'),
+    ];
+
+    await watchlistSync.syncWatchlist();
+
+    assert.deepStrictEqual(
+      requestCalls.map((c) => [c.mediaId, c.seasons]),
+      [
+        [401, [2]],
+        [402, 'all'],
+      ]
     );
   });
 });

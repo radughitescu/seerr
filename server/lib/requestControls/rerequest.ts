@@ -3,11 +3,15 @@ import { MediaStatus, MediaType } from '@server/constants/media';
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import { MediaRequest } from '@server/entity/MediaRequest';
-import type { ControlState } from '@server/entity/RequestItemControl';
+import type {
+  ControlState,
+  RequestItemControl,
+} from '@server/entity/RequestItemControl';
 import type { User } from '@server/entity/User';
 import type { MediaRequestBody } from '@server/interfaces/api/requestInterfaces';
 import { Permission } from '@server/lib/permissions';
-import { getSettings } from '@server/lib/settings';
+import { requestableSeasons } from '@server/lib/requestableSeasons';
+import { canViewRequest } from '@server/routes/requestLive';
 import { actions } from './actions';
 import { effectiveState, getControls } from './store';
 
@@ -32,14 +36,15 @@ function canRequest(user: User, mediaType: MediaType, is4k: boolean) {
 }
 
 async function allSeasons(tmdbId: number): Promise<number[]> {
-  const show = await new TheMovieDb().getTvShow({ tvId: tmdbId });
-  const seasons = show.seasons
-    .filter((season) => season.season_number !== 0 && season.episode_count > 0)
-    .map((season) => season.season_number);
-  return getSettings().main.enableSpecialEpisodes
-    ? seasons
-    : seasons.filter((seasonNumber) => seasonNumber > 0);
+  return requestableSeasons(await new TheMovieDb().getTvShow({ tvId: tmdbId }));
 }
+
+const heldUnder = (controls: RequestItemControl[], seasonNumber: number) =>
+  effectiveState(controls, seasonNumber, null) !== null ||
+  controls.some(
+    (control) =>
+      control.seasonNumber === seasonNumber && control.episodeNumber !== null
+  );
 
 const reload = (request: MediaRequest) =>
   getRepository(MediaRequest).findOneOrFail({ where: { id: request.id } });
@@ -72,7 +77,24 @@ export async function reRequestControlled(
   const covered = new Set<number>();
   let converted: MediaRequest | null = null;
 
+  const run = (
+    request: MediaRequest,
+    state: ControlState,
+    seasonNumber: number | null,
+    episodeNumber: number | null
+  ) =>
+    actions.runAction({
+      request,
+      action: actionFor(state),
+      seasonNumber,
+      episodeNumber,
+      user,
+    });
+
   for (const request of requests) {
+    if (!canViewRequest(user, request)) {
+      continue;
+    }
     const controls = await getControls(request.id);
     if (controls.length === 0) {
       continue;
@@ -83,13 +105,7 @@ export async function reRequestControlled(
       if (state === null) {
         continue;
       }
-      await actions.runAction({
-        request,
-        action: actionFor(state),
-        seasonNumber: null,
-        episodeNumber: null,
-        user,
-      });
+      await run(request, state, null, null);
       converted ??= request;
       continue;
     }
@@ -99,34 +115,31 @@ export async function reRequestControlled(
       .filter(
         (seasonNumber) =>
           (wanted === null || wanted.includes(seasonNumber)) &&
-          effectiveState(controls, seasonNumber, null) !== null
+          heldUnder(controls, seasonNumber)
       );
     if (seasons.length === 0) {
       continue;
     }
 
-    const top = effectiveState(controls, null, null);
+    let current = controls;
+    const top = effectiveState(current, null, null);
     if (top !== null) {
-      await actions.runAction({
-        request,
-        action: actionFor(top),
-        seasonNumber: null,
-        episodeNumber: null,
-        user,
-      });
+      await run(request, top, null, null);
+      current = await getControls(request.id);
     }
 
-    const current = top !== null ? await getControls(request.id) : controls;
     for (const seasonNumber of seasons) {
-      const state = effectiveState(current, seasonNumber, null);
-      if (state !== null) {
-        await actions.runAction({
-          request,
-          action: actionFor(state),
-          seasonNumber,
-          episodeNumber: null,
-          user,
-        });
+      const seasonState = current.find(
+        (c) => c.seasonNumber === seasonNumber && c.episodeNumber === null
+      )?.state;
+      if (seasonState) {
+        await run(request, seasonState, seasonNumber, null);
+        current = await getControls(request.id);
+      }
+      for (const row of current.filter(
+        (c) => c.seasonNumber === seasonNumber && c.episodeNumber !== null
+      )) {
+        await run(request, row.state, seasonNumber, row.episodeNumber);
       }
       covered.add(seasonNumber);
     }

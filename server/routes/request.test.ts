@@ -22,8 +22,12 @@ import SeasonRequest from '@server/entity/SeasonRequest';
 import { User } from '@server/entity/User';
 import type { RequestLiveState } from '@server/lib/liveStatus/types';
 import { Permission } from '@server/lib/permissions';
-import { ServiceError, actions } from '@server/lib/requestControls/actions';
-import { setControl } from '@server/lib/requestControls/store';
+import {
+  ActionError,
+  ServiceError,
+  actions,
+} from '@server/lib/requestControls/actions';
+import { clearControl, setControl } from '@server/lib/requestControls/store';
 import type { RadarrSettings, SonarrSettings } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import { checkUser } from '@server/middleware/auth';
@@ -1640,9 +1644,10 @@ describe('POST /request for paused or deleted items', () => {
     mediaType: MediaType;
     status: MediaRequestStatus;
     seasons?: number[];
+    requestedBy?: string;
   }) {
     const requestedBy = await getRepository(User).findOneOrFail({
-      where: { email: 'demo@seerr.dev' },
+      where: { email: options.requestedBy ?? 'demo@seerr.dev' },
     });
     const media = await getRepository(Media).save(
       new Media({
@@ -1852,6 +1857,169 @@ describe('POST /request for paused or deleted items', () => {
       service: 'sonarr',
       message: 'Sonarr is unreachable.',
     });
+    assert.strictEqual(await getRepository(MediaRequest).count(), before);
+  });
+
+  for (const [status, state, action] of [
+    [MediaRequestStatus.APPROVED, 'paused', 'resume'],
+    [MediaRequestStatus.COMPLETED, 'deleted', 'restore'],
+  ] as const) {
+    it(`converts a request for a season with a ${state} episode on a ${MediaRequestStatus[status].toLowerCase()} request`, async (t) => {
+      stubSend(t);
+      const runAction = stubRunAction(t);
+      const tmdbId = 77100 + status;
+      const { request: existing, user } = await seedControlled({
+        tmdbId,
+        mediaType: MediaType.TV,
+        status,
+        seasons: [1, 2],
+      });
+      await setControl(
+        { requestId: existing.id, seasonNumber: 2, episodeNumber: 4 },
+        state,
+        user.id
+      );
+      await setControl(
+        { requestId: existing.id, seasonNumber: 2, episodeNumber: 6 },
+        state,
+        user.id
+      );
+      const before = await getRepository(MediaRequest).count();
+
+      const agent = await loginAs('demo@seerr.dev', 'test1234');
+      const res = await agent.post('/request').send({
+        mediaType: MediaType.TV,
+        mediaId: tmdbId,
+        seasons: [2],
+      });
+
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(res.body.id, existing.id);
+      assert.strictEqual(await getRepository(MediaRequest).count(), before);
+      assert.deepStrictEqual(
+        runAction.mock.calls.map(({ arguments: [c] }) => [
+          c.action,
+          c.seasonNumber,
+          c.episodeNumber,
+        ]),
+        [
+          [action, 2, 4],
+          [action, 2, 6],
+        ]
+      );
+    });
+  }
+
+  it('runs the whole-request action first and then the season rows it left', async (t) => {
+    stubSend(t);
+    const { request: existing, user } = await seedControlled({
+      tmdbId: 77110,
+      mediaType: MediaType.TV,
+      status: MediaRequestStatus.APPROVED,
+      seasons: [1, 2],
+    });
+    await setControl(
+      { requestId: existing.id, seasonNumber: null, episodeNumber: null },
+      'paused',
+      user.id
+    );
+    const impl: typeof actions.runAction = async (req) => {
+      if (req.seasonNumber === null) {
+        await clearControl({
+          requestId: existing.id,
+          seasonNumber: null,
+          episodeNumber: null,
+        });
+        await setControl(
+          { requestId: existing.id, seasonNumber: 1, episodeNumber: null },
+          'deleted',
+          user.id
+        );
+      }
+      return {} as unknown as RequestLiveState;
+    };
+    const runAction = t.mock.method(actions, 'runAction', impl);
+    const before = await getRepository(MediaRequest).count();
+
+    const agent = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.TV,
+      mediaId: 77110,
+      seasons: [1, 2],
+    });
+
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(res.body.id, existing.id);
+    assert.strictEqual(await getRepository(MediaRequest).count(), before);
+    assert.deepStrictEqual(
+      runAction.mock.calls.map(({ arguments: [c] }) => [
+        c.action,
+        c.seasonNumber,
+        c.episodeNumber,
+      ]),
+      [
+        ['resume', null, null],
+        ['restore', 1, null],
+      ]
+    );
+  });
+
+  it('maps an ActionError from the conversion to its status', async (t) => {
+    stubSend(t);
+    t.mock.method(actions, 'runAction', async () => {
+      throw new ActionError(
+        400,
+        'Cannot resume this item in its current state.'
+      );
+    });
+    const { request: existing, user } = await seedControlled({
+      tmdbId: 77111,
+      mediaType: MediaType.MOVIE,
+      status: MediaRequestStatus.APPROVED,
+    });
+    await setControl(
+      { requestId: existing.id, seasonNumber: null, episodeNumber: null },
+      'paused',
+      user.id
+    );
+
+    const agent = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.MOVIE,
+      mediaId: 77111,
+    });
+
+    assert.strictEqual(res.status, 400);
+    assert.strictEqual(
+      res.body.message,
+      'Cannot resume this item in its current state.'
+    );
+  });
+
+  it('follows upstream for a user who cannot view the paused request', async (t) => {
+    stubSend(t);
+    const runAction = stubRunAction(t);
+    const { request: existing, user } = await seedControlled({
+      tmdbId: 77112,
+      mediaType: MediaType.MOVIE,
+      status: MediaRequestStatus.APPROVED,
+      requestedBy: 'admin@seerr.dev',
+    });
+    await setControl(
+      { requestId: existing.id, seasonNumber: null, episodeNumber: null },
+      'paused',
+      user.id
+    );
+    const before = await getRepository(MediaRequest).count();
+
+    const agent = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.MOVIE,
+      mediaId: 77112,
+    });
+
+    assert.strictEqual(res.status, 409);
+    assert.strictEqual(runAction.mock.callCount(), 0);
     assert.strictEqual(await getRepository(MediaRequest).count(), before);
   });
 

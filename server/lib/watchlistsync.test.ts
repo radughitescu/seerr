@@ -338,4 +338,49 @@ describe('WatchlistSync paused and deleted items', () => {
       ]
     );
   });
+
+  it('still requests new seasons of a show paused as a whole', async () => {
+    const user = await configureSyncUser();
+    await seedMedia(403, MediaType.TV, MediaStatus.PARTIALLY_AVAILABLE);
+    const request = await seedControlledRequest(user, 403, MediaType.TV, [1]);
+    await setControl(
+      { requestId: request.id, seasonNumber: null, episodeNumber: null },
+      'paused',
+      user.id
+    );
+
+    watchlistItems = [showItem(403, 'Paused Show')];
+
+    await watchlistSync.syncWatchlist();
+
+    assert.deepStrictEqual(
+      requestCalls.map((c) => [c.mediaId, c.seasons]),
+      [[403, [2]]]
+    );
+  });
+
+  it('does not request a season that holds a paused episode', async () => {
+    const user = await configureSyncUser();
+    await seedMedia(404, MediaType.TV, MediaStatus.PARTIALLY_AVAILABLE);
+    const request = await seedControlledRequest(
+      user,
+      404,
+      MediaType.TV,
+      [1, 2]
+    );
+    await setControl(
+      { requestId: request.id, seasonNumber: 2, episodeNumber: 4 },
+      'paused',
+      user.id
+    );
+
+    watchlistItems = [showItem(404, 'Show With Paused Episode')];
+
+    await watchlistSync.syncWatchlist();
+
+    assert.deepStrictEqual(
+      requestCalls.map((c) => [c.mediaId, c.seasons]),
+      [[404, [1]]]
+    );
+  });
 });

@@ -6718,6 +6718,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MediaRequest'
+        '502':
+          description: Resuming or restoring an existing paused or deleted request failed at Sonarr, Radarr or Transmission
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service:
+                    type: string
+                    enum: [sonarr, radarr, transmission]
+                  message:
+                    type: string
   /request/count:
     get:
       summary: Gets request counts

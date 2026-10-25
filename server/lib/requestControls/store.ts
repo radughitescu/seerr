@@ -220,9 +220,26 @@ export async function isBlocked(
   return false;
 }
 
-export async function mediaHasControls(mediaId: number): Promise<boolean> {
-  const count = await getRepository(RequestItemControl).count({
-    where: { request: { media: { id: mediaId }, is4k: false } },
+export async function heldSeasons(mediaId: number): Promise<Set<number>> {
+  const requests = await getRepository(MediaRequest).find({
+    where: { media: { id: mediaId }, is4k: false },
   });
-  return count > 0;
+  const held = new Set<number>();
+  for (const request of requests) {
+    const controls = await getControls(request.id);
+    if (controls.length === 0) {
+      continue;
+    }
+    for (const control of controls) {
+      if (control.seasonNumber !== null) {
+        held.add(control.seasonNumber);
+      }
+    }
+    if (effectiveState(controls, null, null) !== null) {
+      for (const season of request.seasons ?? []) {
+        held.add(season.seasonNumber);
+      }
+    }
+  }
+  return held;
 }

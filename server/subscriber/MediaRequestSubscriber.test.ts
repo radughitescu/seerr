@@ -19,9 +19,14 @@ import { User } from '@server/entity/User';
 import { setControl } from '@server/lib/requestControls/store';
 import type { RadarrSettings, SonarrSettings } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
+import logger from '@server/logger';
 import { setupTestDb } from '@server/test/db';
 import axios from 'axios';
-import { MediaRequestSubscriber } from './MediaRequestSubscriber';
+import {
+  EPISODE_POLL_MS,
+  EPISODE_WAIT_MS,
+  MediaRequestSubscriber,
+} from './MediaRequestSubscriber';
 
 setupTestDb();
 
@@ -74,6 +79,8 @@ type Call = { service: string; method: string; url: string; data?: unknown };
 type World = {
   inLibrary?: boolean;
   episodes?: Episode[];
+  emptyEpisodeCalls?: number;
+  failMonitorCalls?: number;
 };
 
 const AIRED = '2020-01-01T00:00:00Z';
@@ -129,7 +136,19 @@ function installServarr(world: World) {
         };
       }
       if (method === 'get' && url === '/episode') {
+        if (world.emptyEpisodeCalls) {
+          world.emptyEpisodeCalls--;
+          return { data: [] };
+        }
         return { data: world.episodes ?? [] };
+      }
+      if (
+        method === 'put' &&
+        url === '/episode/monitor' &&
+        world.failMonitorCalls
+      ) {
+        world.failMonitorCalls--;
+        throw new Error('Sonarr is unreachable');
       }
       if ((method === 'put' || method === 'post') && url === '/series') {
         return {
@@ -272,6 +291,14 @@ const commands = (calls: Call[]) =>
 const seriesPut = (calls: Call[]) =>
   calls.find((c) => c.method === 'put' && c.url === '/series')?.data as
     | { seasons: { seasonNumber: number; monitored: boolean }[] }
+    | undefined;
+
+const newSeries = (calls: Call[]) =>
+  calls.find((c) => c.method === 'post' && c.url === '/series')?.data as
+    | {
+        seasons: { seasonNumber: number; monitored: boolean }[];
+        addOptions: { searchForMissingEpisodes: boolean };
+      }
     | undefined;
 
 const monitorCalls = (calls: Call[]) =>
@@ -419,29 +446,12 @@ describe('MediaRequestSubscriber guards for paused and deleted items', () => {
 
     await send(ctx.request);
 
-    const searched = commands(calls);
-    assert.ok(searched.length > 0, 'the unblocked season is searched');
-    for (const command of searched) {
-      assert.ok(
-        ['EpisodeSearch', 'SeasonSearch'].includes(command.name),
-        `unexpected command ${command.name}`
-      );
-      if (command.name === 'SeasonSearch') {
-        assert.strictEqual(command.seasonNumber, 1);
-      } else {
-        assert.ok(
-          (command.episodeIds as number[]).every((id) => id < 200),
-          'no episode of season 2 is searched'
-        );
-      }
-    }
-    assert.deepStrictEqual(
-      searched.flatMap((c) => (c.episodeIds as number[]) ?? []),
-      [101]
-    );
+    assert.deepStrictEqual(commands(calls), [
+      { name: 'EpisodeSearch', episodeIds: [101] },
+    ]);
   });
 
-  it('sendToSonarr adds a new series without its own search when a season is blocked', async () => {
+  it('sendToSonarr adds a new series with a season-level block using its own search', async () => {
     const calls = installServarr({
       inLibrary: false,
       episodes: [episode(1, 1), episode(2, 1)],
@@ -455,13 +465,9 @@ describe('MediaRequestSubscriber guards for paused and deleted items', () => {
 
     await send(ctx.request);
 
-    const post = calls.find((c) => c.method === 'post' && c.url === '/series')
-      ?.data as {
-      seasons: { seasonNumber: number; monitored: boolean }[];
-      addOptions: { searchForMissingEpisodes: boolean };
-    };
+    const post = newSeries(calls);
     assert.ok(post);
-    assert.strictEqual(post.addOptions.searchForMissingEpisodes, false);
+    assert.strictEqual(post.addOptions.searchForMissingEpisodes, true);
     assert.deepStrictEqual(
       post.seasons.map((s) => [s.seasonNumber, s.monitored]),
       [
@@ -469,10 +475,136 @@ describe('MediaRequestSubscriber guards for paused and deleted items', () => {
         [2, false],
       ]
     );
-    assert.deepStrictEqual(
-      commands(calls).flatMap((c) => (c.episodeIds as number[]) ?? []),
-      [101]
+    assert.deepStrictEqual(commands(calls), []);
+    assert.ok(!calls.some((c) => c.url === '/episode'));
+  });
+
+  it('sendToSonarr waits for a new series to list episodes before holding them', async () => {
+    const calls = installServarr({
+      inLibrary: false,
+      emptyEpisodeCalls: 2,
+      episodes: [episode(1, 1), episode(1, 2), episode(1, 3)],
+    });
+    const ctx = await seed(MediaType.TV, [1]);
+    await setControl(
+      { requestId: ctx.request.id, seasonNumber: 1, episodeNumber: 3 },
+      'paused',
+      ctx.user.id
     );
+
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await send(ctx.request);
+      assert.strictEqual(
+        newSeries(calls)?.addOptions.searchForMissingEpisodes,
+        false
+      );
+      assert.deepStrictEqual(monitorCalls(calls), []);
+      for (let i = 0; i < 3; i++) {
+        mock.timers.tick(EPISODE_POLL_MS);
+        await settle();
+      }
+    } finally {
+      mock.timers.reset();
+    }
+
+    assert.strictEqual(calls.filter((c) => c.url === '/episode').length, 3);
+    assert.deepStrictEqual(monitorCalls(calls), [
+      { episodeIds: [103], monitored: false },
+    ]);
+    assert.deepStrictEqual(commands(calls), [
+      { name: 'EpisodeSearch', episodeIds: [101, 102] },
+    ]);
+  });
+
+  it('sendToSonarr warns with the held episodes when a new series never lists episodes', async () => {
+    const warn = mock.method(logger, 'warn');
+    const calls = installServarr({
+      inLibrary: false,
+      emptyEpisodeCalls: 1000,
+      episodes: [episode(1, 1)],
+    });
+    const ctx = await seed(MediaType.TV, [1]);
+    await setControl(
+      { requestId: ctx.request.id, seasonNumber: 1, episodeNumber: 3 },
+      'paused',
+      ctx.user.id
+    );
+
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await send(ctx.request);
+      for (let i = 0; i < EPISODE_WAIT_MS / EPISODE_POLL_MS + 2; i++) {
+        mock.timers.tick(EPISODE_POLL_MS);
+        await settle();
+      }
+    } finally {
+      mock.timers.reset();
+    }
+
+    assert.strictEqual(
+      calls.filter((c) => c.url === '/episode').length,
+      EPISODE_WAIT_MS / EPISODE_POLL_MS + 1
+    );
+    assert.deepStrictEqual(monitorCalls(calls), []);
+    assert.deepStrictEqual(commands(calls), []);
+    const held = warn.mock.calls
+      .map((c) => (c.arguments as unknown[])[1] as { heldEpisodes?: string[] })
+      .find((meta) => meta?.heldEpisodes);
+    assert.deepStrictEqual(held?.heldEpisodes, ['S1E3']);
+  });
+
+  it('sendToSonarr retries a failed unmonitor once', async () => {
+    const calls = installServarr({
+      failMonitorCalls: 1,
+      episodes: [
+        episode(1, 1, { monitored: true }),
+        episode(1, 2, { monitored: true }),
+      ],
+    });
+    const ctx = await seed(MediaType.TV, [1]);
+    await setControl(
+      { requestId: ctx.request.id, seasonNumber: 1, episodeNumber: 2 },
+      'deleted',
+      ctx.user.id
+    );
+
+    await send(ctx.request);
+
+    assert.deepStrictEqual(
+      monitorCalls(calls).filter((c) => !c.monitored),
+      [
+        { episodeIds: [102], monitored: false },
+        { episodeIds: [102], monitored: false },
+      ]
+    );
+  });
+
+  it('sendToSonarr warns with the episode ids when the unmonitor fails twice', async () => {
+    const warn = mock.method(logger, 'warn');
+    const calls = installServarr({
+      failMonitorCalls: 2,
+      episodes: [
+        episode(1, 1, { monitored: true }),
+        episode(1, 2, { monitored: true }),
+      ],
+    });
+    const ctx = await seed(MediaType.TV, [1]);
+    await setControl(
+      { requestId: ctx.request.id, seasonNumber: 1, episodeNumber: 2 },
+      'deleted',
+      ctx.user.id
+    );
+
+    await send(ctx.request);
+
+    const failed = warn.mock.calls
+      .map((c) => (c.arguments as unknown[])[1] as { episodeIds?: number[] })
+      .find((meta) => meta?.episodeIds);
+    assert.deepStrictEqual(failed?.episodeIds, [102]);
+    assert.deepStrictEqual(commands(calls), [
+      { name: 'EpisodeSearch', episodeIds: [101] },
+    ]);
   });
 
   it('request without controls is sent exactly as upstream', async () => {

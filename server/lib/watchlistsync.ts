@@ -12,7 +12,8 @@ import {
   RequestPermissionError,
 } from '@server/entity/MediaRequest';
 import { User } from '@server/entity/User';
-import { isBlocked, mediaHasControls } from '@server/lib/requestControls/store';
+import { heldSeasons, isBlocked } from '@server/lib/requestControls/store';
+import { requestableSeasons } from '@server/lib/requestableSeasons';
 import logger from '@server/logger';
 import { Permission } from './permissions';
 
@@ -220,22 +221,17 @@ class WatchlistSync {
       return media && (await isBlocked(media.id)) ? null : undefined;
     }
 
-    if (!media || !(await mediaHasControls(media.id))) {
+    if (!media) {
+      return 'all';
+    }
+    const held = await heldSeasons(media.id);
+    if (held.size === 0) {
       return 'all';
     }
 
     const show = await new TheMovieDb().getTvShow({ tvId: item.tmdbId });
-    const candidates = show.seasons
-      .filter(
-        (season) => season.season_number !== 0 && season.episode_count > 0
-      )
-      .map((season) => season.season_number);
-    const open: number[] = [];
-    for (const seasonNumber of candidates) {
-      if (!(await isBlocked(media.id, seasonNumber))) {
-        open.push(seasonNumber);
-      }
-    }
+    const candidates = requestableSeasons(show);
+    const open = candidates.filter((seasonNumber) => !held.has(seasonNumber));
 
     if (open.length === 0) {
       return null;

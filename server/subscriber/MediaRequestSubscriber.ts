@@ -44,6 +44,17 @@ const sanitizeDisplayName = (displayName: string): string => {
     .replace(/^-|-$/g, '');
 };
 
+export const EPISODE_POLL_MS = 1000;
+export const EPISODE_WAIT_MS = 30000;
+
+async function retryOnce<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch {
+    return fn();
+  }
+}
+
 @EventSubscriber()
 export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRequest> {
   private async notifyAvailableMovie(
@@ -753,6 +764,9 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           }
         }
 
+        const isNew = guarded ? await this.isNewSeries(sonarr, tvdbId) : false;
+        const sonarrSearches = isNew && !heldEpisodes;
+
         const sonarrSeriesOptions: AddSeriesOptions = {
           profileId: qualityProfile,
           languageProfileId: languageProfile,
@@ -767,7 +781,8 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           tags,
           monitored: true,
           monitorNewItems: sonarrSettings.monitorNewItems,
-          searchNow: !sonarrSettings.preventSearch && !guarded,
+          searchNow:
+            !sonarrSettings.preventSearch && (!guarded || sonarrSearches),
         };
 
         // Run entity asynchronously so we don't wait for it on the UI side
@@ -794,15 +809,15 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
               sonarrSettings?.id;
             await mediaRepository.save(media);
 
-            if (guarded && sonarrSeries.id) {
-              await this.holdControlledEpisodes(
-                sonarr,
-                sonarrSeries.id,
+            if (guarded && !sonarrSearches && sonarrSeries.id) {
+              await this.holdControlledEpisodes(sonarr, {
+                seriesId: sonarrSeries.id,
                 controls,
-                seasonsToSend,
-                !sonarrSettings?.preventSearch,
-                entity.id
-              );
+                seasons: seasonsToSend,
+                search: !sonarrSettings?.preventSearch,
+                requestId: entity.id,
+                waitForEpisodes: isNew,
+              });
             }
           })
           .catch(async () => {
@@ -885,59 +900,131 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
     }
   }
 
+  private async isNewSeries(
+    sonarr: SonarrAPI,
+    tvdbId: number
+  ): Promise<boolean> {
+    try {
+      return !(await sonarr.getSeriesByTvdbId(tvdbId)).id;
+    } catch {
+      return false;
+    }
+  }
+
   private async holdControlledEpisodes(
     sonarr: SonarrAPI,
-    seriesId: number,
-    controls: RequestItemControl[],
-    seasons: number[],
-    search: boolean,
-    requestId: number
+    hold: {
+      seriesId: number;
+      controls: RequestItemControl[];
+      seasons: number[];
+      search: boolean;
+      requestId: number;
+      waitForEpisodes: boolean;
+    }
   ): Promise<void> {
+    const { seriesId, controls, seasons, requestId } = hold;
+    const heldEpisodes = controls
+      .filter(
+        (control) =>
+          control.seasonNumber !== null &&
+          control.episodeNumber !== null &&
+          seasons.includes(control.seasonNumber)
+      )
+      .map((control) => `S${control.seasonNumber}E${control.episodeNumber}`);
+
+    let episodes: EpisodeResult[];
     try {
-      const episodes = await sonarr.getEpisodes(seriesId);
-      const held = (episode: EpisodeResult) =>
-        effectiveState(
-          controls,
-          episode.seasonNumber,
-          episode.episodeNumber
-        ) !== null;
-
-      const unmonitor = episodes
-        .filter(
-          (episode) =>
-            held(episode) &&
-            (episode.monitored || seasons.includes(episode.seasonNumber))
-        )
-        .map((episode) => episode.id);
-      if (unmonitor.length > 0) {
-        await sonarr.setEpisodesMonitored(unmonitor, false);
-      }
-
-      if (!search) {
-        return;
-      }
-
-      const now = Date.now();
-      const missing = episodes
-        .filter(
-          (episode) =>
-            seasons.includes(episode.seasonNumber) &&
-            !held(episode) &&
-            !episode.hasFile &&
-            !!episode.airDateUtc &&
-            Date.parse(episode.airDateUtc) <= now
-        )
-        .map((episode) => episode.id);
-      if (missing.length > 0) {
-        await sonarr.searchEpisodes(missing);
+      episodes = await retryOnce(() => sonarr.getEpisodes(seriesId));
+      for (
+        let waited = 0;
+        hold.waitForEpisodes &&
+        episodes.length === 0 &&
+        waited < EPISODE_WAIT_MS;
+        waited += EPISODE_POLL_MS
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, EPISODE_POLL_MS));
+        episodes = await retryOnce(() => sonarr.getEpisodes(seriesId));
       }
     } catch (e) {
-      logger.error('Failed to hold paused or deleted episodes in Sonarr', {
+      logger.warn('Could not load episodes to hold paused or deleted items', {
         label: 'Media Request',
         requestId,
         seriesId,
+        heldEpisodes,
         errorMessage: e instanceof Error ? e.message : String(e),
       });
+      return;
+    }
+
+    if (episodes.length === 0) {
+      if (heldEpisodes.length > 0) {
+        logger.warn(
+          'Sonarr listed no episodes, paused or deleted episodes not held',
+          {
+            label: 'Media Request',
+            requestId,
+            seriesId,
+            heldEpisodes,
+          }
+        );
+      }
+      return;
+    }
+
+    const held = (episode: EpisodeResult) =>
+      effectiveState(controls, episode.seasonNumber, episode.episodeNumber) !==
+      null;
+
+    const unmonitor = episodes
+      .filter(
+        (episode) =>
+          held(episode) &&
+          (episode.monitored || seasons.includes(episode.seasonNumber))
+      )
+      .map((episode) => episode.id);
+    if (unmonitor.length > 0) {
+      try {
+        await retryOnce(() => sonarr.setEpisodesMonitored(unmonitor, false));
+      } catch (e) {
+        logger.warn('Could not unmonitor paused or deleted episodes', {
+          label: 'Media Request',
+          requestId,
+          seriesId,
+          episodeIds: unmonitor,
+          errorMessage: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    if (!hold.search) {
+      return;
+    }
+
+    const now = Date.now();
+    const missing = episodes
+      .filter(
+        (episode) =>
+          seasons.includes(episode.seasonNumber) &&
+          !held(episode) &&
+          !episode.hasFile &&
+          !!episode.airDateUtc &&
+          Date.parse(episode.airDateUtc) <= now
+      )
+      .map((episode) => episode.id);
+    if (missing.length > 0) {
+      try {
+        await sonarr.searchEpisodes(missing);
+      } catch (e) {
+        logger.error(
+          'Failed to search episodes that are not paused or deleted',
+          {
+            label: 'Media Request',
+            requestId,
+            seriesId,
+            errorMessage: e instanceof Error ? e.message : String(e),
+          }
+        );
+      }
     }
   }
 
